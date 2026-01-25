@@ -1,0 +1,28 @@
+# Go build outputs
+/bin/
+/build/
+/dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Go test outputs
+*.test
+*.out
+
+# Go workspace
+/go.work
+/go.work.sum
+
+# Dependency caches
+/pkg/
+
+# Editor/OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*.tmp
