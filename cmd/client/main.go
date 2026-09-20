@@ -2,258 +2,122 @@ package main
 
 import (
 	"bufio"
-	"context"
-	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"os"
-	"strconv"
 	"strings"
 
-	"kestreldb/internal/client"
+	"kestreldb/internal/proto"
 )
 
 func main() {
 	addr := flag.String("addr", "127.0.0.1:6380", "server address")
 	flag.Parse()
 
-	c, err := client.Dial(*addr)
+	conn, err := net.Dial("tcp", *addr)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
-	defer c.Close()
+	defer conn.Close()
 
-	args := flag.Args()
-	if len(args) > 0 {
-		if _, err := executeCommand(context.Background(), c, args); err != nil {
-			fmt.Fprintln(os.Stderr, "error:", err)
+	r := bufio.NewReader(conn)
+	bw := bufio.NewWriter(conn)
+
+	// one-shot mode: kdb HSET key field value
+	if args := flag.Args(); len(args) > 0 {
+		if err := send(bw, args); err != nil {
+			fmt.Fprintln(os.Stderr, "send:", err)
 			os.Exit(1)
 		}
+		resp, err := proto.ReadResponse(r)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "read:", err)
+			os.Exit(1)
+		}
+		printResponse(resp, "")
 		return
 	}
 
-	repl(c)
+	// interactive REPL
+	repl(r, bw)
 }
 
-func repl(c *client.Client) {
-	scanner := bufio.NewScanner(os.Stdin)
+func repl(r *bufio.Reader, bw *bufio.Writer) {
+	stdin := bufio.NewScanner(os.Stdin)
 	for {
 		fmt.Print("kdb> ")
-		if !scanner.Scan() {
+		if !stdin.Scan() {
 			fmt.Println()
 			return
 		}
 
-		line := strings.TrimSpace(scanner.Text())
+		line := strings.TrimSpace(stdin.Text())
 		if line == "" {
 			continue
 		}
 
-		quit, err := executeCommand(context.Background(), c, strings.Fields(line))
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "error:", err)
-			continue
-		}
-		if quit {
+		// local quit without round-trip
+		upper := strings.ToUpper(line)
+		if upper == "QUIT" || upper == "EXIT" {
+			fmt.Println("BYE")
 			return
 		}
+
+		// send raw line — server does all parsing
+		if _, err := fmt.Fprintf(bw, "%s\n", line); err != nil {
+			fmt.Fprintln(os.Stderr, "send:", err)
+			return
+		}
+		if err := bw.Flush(); err != nil {
+			fmt.Fprintln(os.Stderr, "flush:", err)
+			return
+		}
+
+		resp, err := proto.ReadResponse(r)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "read:", err)
+			return
+		}
+		printResponse(resp, "")
 	}
 }
 
-func executeCommand(ctx context.Context, c *client.Client, parts []string) (bool, error) {
-	if len(parts) == 0 {
-		return false, nil
+// send formats tokens as a KLP command line and writes it to bw.
+func send(bw *bufio.Writer, tokens []string) error {
+	line := proto.FormatCommand(tokens)
+	if _, err := bw.WriteString(line); err != nil {
+		return err
 	}
-
-	command := strings.ToUpper(parts[0])
-	args := parts[1:]
-
-	switch command {
-	case "PING":
-		if err := requireArgCount(command, args, 0); err != nil {
-			return false, err
-		}
-		resp, err := c.Ping(ctx)
-		if err != nil {
-			return false, err
-		}
-		fmt.Println(resp.GetMessage())
-		return false, nil
-	case "QUIT", "EXIT":
-		fmt.Println("BYE")
-		return true, nil
-	case "HSET":
-		if err := requireArgCount(command, args, 3); err != nil {
-			return false, err
-		}
-		resp, err := c.HashSet(ctx, args[0], args[1], []byte(args[2]))
-		if err != nil {
-			return false, err
-		}
-		fmt.Println(boolToInt(resp.GetCreated()))
-		return false, nil
-	case "HGET":
-		if err := requireArgCount(command, args, 2); err != nil {
-			return false, err
-		}
-		resp, err := c.HashGet(ctx, args[0], args[1])
-		if err != nil {
-			return false, err
-		}
-		if !resp.GetFound() {
-			fmt.Println("(nil)")
-			return false, nil
-		}
-		fmt.Println(string(resp.GetValue()))
-		return false, nil
-	case "HDEL":
-		if err := requireArgCount(command, args, 2); err != nil {
-			return false, err
-		}
-		resp, err := c.HashDelete(ctx, args[0], args[1])
-		if err != nil {
-			return false, err
-		}
-		fmt.Println(boolToInt(resp.GetDeleted()))
-		return false, nil
-	case "HLEN":
-		if err := requireArgCount(command, args, 1); err != nil {
-			return false, err
-		}
-		resp, err := c.HashLen(ctx, args[0])
-		if err != nil {
-			return false, err
-		}
-		fmt.Println(resp.GetLength())
-		return false, nil
-	case "HGETALL":
-		if err := requireArgCount(command, args, 1); err != nil {
-			return false, err
-		}
-		resp, err := c.HashGetAll(ctx, args[0])
-		if err != nil {
-			return false, err
-		}
-		if len(resp.GetEntries()) == 0 {
-			fmt.Println("(empty)")
-			return false, nil
-		}
-		for i, entry := range resp.GetEntries() {
-			fmt.Printf("%d) %s=%s\n", i+1, entry.GetField(), string(entry.GetValue()))
-		}
-		return false, nil
-	case "ZADD":
-		if err := requireArgCount(command, args, 3); err != nil {
-			return false, err
-		}
-		score, err := strconv.ParseFloat(args[1], 64)
-		if err != nil {
-			return false, errors.New("invalid score")
-		}
-		resp, err := c.SortedSetAdd(ctx, args[0], score, args[2])
-		if err != nil {
-			return false, err
-		}
-		fmt.Println(boolToInt(resp.GetAdded()))
-		return false, nil
-	case "ZREM":
-		if err := requireArgCount(command, args, 2); err != nil {
-			return false, err
-		}
-		resp, err := c.SortedSetRemove(ctx, args[0], args[1])
-		if err != nil {
-			return false, err
-		}
-		fmt.Println(boolToInt(resp.GetRemoved()))
-		return false, nil
-	case "ZSCORE":
-		if err := requireArgCount(command, args, 2); err != nil {
-			return false, err
-		}
-		resp, err := c.SortedSetScore(ctx, args[0], args[1])
-		if err != nil {
-			return false, err
-		}
-		if !resp.GetFound() {
-			fmt.Println("(nil)")
-			return false, nil
-		}
-		fmt.Println(resp.GetScore())
-		return false, nil
-	case "ZCARD":
-		if err := requireArgCount(command, args, 1); err != nil {
-			return false, err
-		}
-		resp, err := c.SortedSetCardinality(ctx, args[0])
-		if err != nil {
-			return false, err
-		}
-		fmt.Println(resp.GetCount())
-		return false, nil
-	case "ZRANGE":
-		if err := requireArgCount(command, args, 3); err != nil {
-			return false, err
-		}
-		start, stop, err := parseRange(args[1], args[2])
-		if err != nil {
-			return false, err
-		}
-		resp, err := c.SortedSetRange(ctx, args[0], start, stop)
-		if err != nil {
-			return false, err
-		}
-		for i, item := range resp.GetItems() {
-			fmt.Printf("%d) %s\n", i+1, item.GetMember())
-		}
-		return false, nil
-	case "ZRANGEWITHSCORES":
-		if err := requireArgCount(command, args, 3); err != nil {
-			return false, err
-		}
-		start, stop, err := parseRange(args[1], args[2])
-		if err != nil {
-			return false, err
-		}
-		resp, err := c.SortedSetRange(ctx, args[0], start, stop)
-		if err != nil {
-			return false, err
-		}
-		if len(resp.GetItems()) == 0 {
-			fmt.Println("(empty)")
-			return false, nil
-		}
-		for i, item := range resp.GetItems() {
-			fmt.Printf("%d) %s (score=%g)\n", i+1, item.GetMember(), item.GetScore())
-		}
-		return false, nil
-	default:
-		return false, fmt.Errorf("unknown command: %s", command)
-	}
+	return bw.Flush()
 }
 
-func requireArgCount(command string, args []string, expected int) error {
-	if len(args) != expected {
-		return fmt.Errorf("%s expects %d argument(s)", command, expected)
-	}
-	return nil
-}
+func printResponse(resp proto.Response, prefix string) {
+	switch resp.Type {
+	case proto.RSimpleString, proto.RBlobString:
+		fmt.Println(prefix + resp.Str)
 
-func parseRange(start string, stop string) (int64, int64, error) {
-	startValue, err := strconv.ParseInt(start, 10, 64)
-	if err != nil {
-		return 0, 0, errors.New("invalid start")
-	}
-	stopValue, err := strconv.ParseInt(stop, 10, 64)
-	if err != nil {
-		return 0, 0, errors.New("invalid stop")
-	}
-	return startValue, stopValue, nil
-}
+	case proto.RInteger:
+		fmt.Printf("%s(integer) %d\n", prefix, resp.Int)
 
-func boolToInt(value bool) int {
-	if value {
-		return 1
+	case proto.RFloat:
+		fmt.Printf("%s%g\n", prefix, resp.Float)
+
+	case proto.RNil:
+		fmt.Println(prefix + "(nil)")
+
+	case proto.RError:
+		fmt.Println(prefix + resp.Str)
+
+	case proto.RArray:
+		if len(resp.Elements) == 0 {
+			fmt.Println(prefix + "(empty)")
+			return
+		}
+		for i, elem := range resp.Elements {
+			fmt.Printf("%s%d) ", prefix, i+1)
+			printResponse(elem, "   ")
+		}
 	}
-	return 0
 }

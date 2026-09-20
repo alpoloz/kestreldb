@@ -1,0 +1,717 @@
+dragonfly: a modern in-memory store.
+
+Usage: dragonfly [FLAGS]
+
+
+  Flags from core/compact_object.cc:
+    --disable_json_defragmentation (If true disable json object
+      defragmentation); default: false;
+    --experimental_flat_json (If true uses flat json implementation.);
+      default: false;
+
+  Flags from core/interpreter.cc:
+    --lua_enable_redis_log (Enable redis.log to write logs from lua script.);
+      default: false;
+    --lua_mem_gc_threshold (Specifies Lua interpreter's per thread memory limit
+      in bytes after which the GC will be called forcefully. 0 value remove
+      forced GC calls); default: 10000000;
+    --luagc (Specifies Lua garabage collector preferences. By default used
+      default lua GC parameters.Format should be 'inc/200/100/13' or
+      'gen/20/100' where 'inc' and 'gen' are types of GC, numbers are
+      parameters.For more information check
+      https://www.lua.org/manual/5.4/manual.html#2.5); default: ;
+
+  Flags from core/qlist.cc:
+    --list_compress_level (Compression level for QList ZSTD dictionaries. -1
+      uses ZSTD's default tuning.); default: -1;
+
+
+  Flags from core/search/indices.cc:
+    --use_numeric_range_tree (Use range tree for numeric index. If false, use a
+      simple implementation with btree_set. Range tree is more memory efficient
+      and faster for range queries, but slower for single value queries.);
+      default: true;
+
+
+  Flags from facade/dragonfly_connection.cc:
+    --admin_bind (If set, the admin consol TCP connection would be bind the
+      given address. This supports both HTTP and RESP protocols); default: "";
+    --admin_port (If set, would enable admin access to console on the assigned
+      port. This supports both HTTP and RESP protocols); default: 0;
+    --always_flush_pipeline (if true will flush pipeline response after each
+      pipeline squashing); default: false;
+    --async_dispatch_quota (Maximum number of consecutive async dispatch
+      messages to process before either yielding to I/O when the pipeline
+      appears empty or forcibly processing a queued pipelined command to prevent
+      starvation. Set to 0 to disable this mechanism.); default: 100;
+    --enable_memcache_io_loop_v2 (Enable the event-driven IoLoopV2 for non-TLS
+      Memcache connections.); default: true;
+    --enable_pipeline_squashing_v2 (Enable vectorized pipeline squashing for the
+      V2 dispatch loop. Groups consecutive single-shard pipeline commands by
+      shard and executes them in parallel.); default: true;
+    --enable_resp_io_loop_v2 (Enable the event-driven IoLoopV2 for non-TLS RESP
+      connections.); default: false;
+    --max_bulk_len (Maximum bulk length that is allowed to be accepted when
+      parsing RESP protocol); default: 2147483648;
+    --max_busy_read_usec (Maximum time we read and parse from a socket without
+      yielding. In microseconds.); default: 200;
+    --max_client_iobuf_len (Maximum io buffer length that is used to read client
+      requests.); default: 64.0KiB;
+    --max_multi_bulk_len (Maximum multi-bulk (array) length that is allowed to
+      be accepted when parsing RESP protocol); default: 65536;
+    --migrate_connections (When enabled, Dragonfly will try to migrate
+      connections to the target thread on which they operate. Currently this is
+      only supported for Lua script invocations, and can happen at most once per
+      connection.); default: true;
+    --pipeline_buffer_limit (Amount of memory to use for storing pipeline
+      requests - per IO thread.Please note that clients that send excecissively
+      huge pipelines, may deadlock themselves. See
+      https://github.com/dragonflydb/dragonfly/discussions/3997for details.);
+      default: 128.00MiB;
+    --pipeline_parse_in_proactor (V2 only: parse newly-arrived bytes from the
+      proactor OnRecv callback while the fiber is parked waiting on parallel
+      work, so the next batch is already grown when execution resumes.);
+      default: true;
+    --pipeline_prioritize_large_batches (V2 only: in ParseLoop, defer executing
+      a parsed pipeline batch and return to the read loop to accumulate more
+      already-available input, so the squasher sees one large batch instead of
+      many small ones.); default: true;
+    --pipeline_queue_limit (Pipeline queue max length, the server will stop
+      reading from the client socket once its pipeline queue crosses this limit,
+      and will resume once it processes excessive requests. This is to prevent
+      OOM states. Users of huge pipelines sizes may require increasing this
+      limit to prevent the risk of deadlocking.See
+      https://github.com/dragonflydb/dragonfly/discussions/3997 for details);
+      default: 10000;
+    --pipeline_squash (Number of queued pipelined commands above which squashing
+      is enabled, 0 means disabled); default: 1;
+    --pipeline_squash_limit (Limit on the size of a squashed pipeline. );
+      default: 1073741824;
+    --pipeline_wait_batch_usec (If non-zero, waits for this time for more I/O
+      events to come for the connection in case there is only one command in the
+      pipeline. ); default: 0;
+    --primary_port_http_enabled (If true allows accessing http console on main
+      TCP port); default: true;
+    --publish_buffer_limit (Amount of memory to use for storing pub commands in
+      bytes - per IO thread. This is the soft Pub/Sub back-pressure limit;
+      publishers are only parked once the per-thread subscriber memory reaches
+      this value times the internal hard-limit multiplier.); default: 196.00MiB;
+    --pubsub_slow_subscriber_timeout_ms (If a subscriber connection keeps a
+      Pub/Sub socket write blocked for at least this many milliseconds,
+      Dragonfly closes it when either its queued Pub/Sub memory reaches
+      one-sixteenth of publish_buffer_limit or the per-IO-thread subscriber
+      memory is above publish_buffer_limit. 0 disables this slow-subscriber
+      protection. Startup-only, like publish_buffer_limit.); default: 0;
+    --request_cache_limit (Amount of memory to use for request cache in bytes -
+      per IO thread.); default: 64.00MiB;
+    --squashed_reply_size_limit (Max bytes allowed for
+      squashing_current_reply_size. If this limit is reached, connections
+      dispatching pipelines won't squash them.); default: 0;
+    --tcp_nodelay (Configures dragonfly connections with socket option
+      TCP_NODELAY); default: true;
+
+  Flags from facade/dragonfly_listener.cc:
+    --conn_io_thread_start (Starting thread id for handling server connections);
+      default: 0;
+    --conn_io_threads (Number of threads used for handing server connections);
+      default: 0;
+    --conn_use_incoming_cpu (If true uses incoming cpu of a socket in order to
+      distribute incoming connections); default: false;
+    --enable_tcp_defer_accept (Enable TCP_DEFER_ACCEPT option on server
+      sockets); default: true;
+    --no_tls_on_admin_port (Allow non-tls connections on admin port);
+      default: false;
+    --tcp_keepalive (the period in seconds of inactivity after which keep-alives
+      are triggerred,the duration until an inactive connection is terminated is
+      twice the specified time); default: 300;
+    --tcp_user_timeout (the maximum period in milliseconds that transimitted
+      data may stay unacknowledged before TCP aborts the connection. 0 means OS
+      default timeout); default: 0;
+    --tls (); default: false;
+
+  Flags from facade/tls_helpers.cc:
+    --tls_ca_cert_dir (ca signed certificates directory. Use c_rehash before,
+      read description in
+      https://www.openssl.org/docs/man3.0/man1/c_rehash.html); default: "";
+    --tls_ca_cert_file (ca signed certificate to validate tls connections);
+      default: "";
+    --tls_cert_file (cert file for tls connections); default: "";
+    --tls_cipher_suites (TLS ciphers configuration for tls1.3); default: "";
+    --tls_ciphers (TLS ciphers configuration for tls1.2);
+      default: "DEFAULT:!MEDIUM";
+    --tls_key_file (key file for tls connections); default: "";
+    --tls_prefer_server_ciphers (If true, prefer server ciphers over client
+      ciphers); default: false;
+    --tls_session_cache_size (Size of the cache for tls sessions);
+      default: 20480;
+    --tls_session_cache_timeout (Timeout for each session/ticket); default: 300;
+    --tls_session_caching (If true enables session caching and tickets);
+      default: false;
+
+
+  Flags from server/cluster_support.cc:
+    --cluster_mode (Cluster mode supported. Possible values are 'emulated',
+      'yes' or ''); default: "";
+    --experimental_cluster_shard_by_slot (If true, cluster mode is enabled and
+      sharding is done by slot. Otherwise, sharding is done by hash tag.);
+      default: false;
+
+  Flags from server/command_registry.cc:
+    --command_alias (Add an alias for given command(s), format is:
+      <alias>=<original>, <alias>=<original>. Aliases must be set identically on
+      replicas, if applicable); default: ;
+    --latency_tracking (If true, track latency for commands); default: false;
+    --restricted_commands (Commands restricted to connections on the admin
+      port); default: ;
+
+  Flags from server/common.cc:
+    --lock_on_hashtags (When true, locks are done in the {hashtag} level instead
+      of key level. Hashtag extraction can be further configured with locktag_*
+      flags.); default: false;
+    --locktag_delimiter (If set, this char is used to extract a lock tag by
+      looking at delimiters, like hash tags. If unset, regular hashtag
+      extraction is done (with {}). Must be used with --lock_on_hashtags);
+      default: "";
+    --locktag_prefix (Only keys with this prefix participate in tag
+      extraction.); default: "";
+    --locktag_skip_n_end_delimiters (How many closing tag delimiters should we
+      skip when extracting lock tags. 0 for no skipping. For example, when
+      delimiter is ':' and this flag is 2, the locktag for ':a:b:c:d:e' will be
+      'a:b:c'.); default: 0;
+
+  Flags from server/container_utils.cc:
+    --container_iteration_yield_interval_usec (Yield the fiber every N
+      microseconds during container iteration. 0 disables yielding.);
+      default: 500;
+
+  Flags from server/db_slice.cc:
+    --cluster_flush_decommit_memory (Decommit memory after flushing slots);
+      default: false;
+    --journal_omit_redundant_writes (If true, omit journal writes for keys
+      during full sync that are yet to be reached by the serialization loop.
+      Reduces full sync overhead); default: true;
+    --max_eviction_per_heartbeat (The maximum number of key-value pairs that
+      will be deleted in each eviction when heartbeat based eviction is
+      triggered under memory pressure.); default: 100;
+    --max_segment_to_consider (The maximum number of dashtable segments to scan
+      in each eviction when heartbeat based eviction is triggered under memory
+      pressure.); default: 4;
+    --notify_keyspace_events (notify-keyspace-events. Only Ex is supported for
+      now); default: "";
+    --replica_delete_expired (If true, replicas proactively delete expired keys
+      on the read path.); default: true;
+    --table_growth_margin (Prevents table from growing if number of free slots x
+      average object size x this ratio is larger than memory budget.);
+      default: 0.4;
+
+  Flags from server/debugcmd.cc:
+    --background_debug_jobs (Use background fibers for debug jobs);
+      default: false;
+
+  Flags from server/dfly_main.cc:
+    --allocation_tracker (Logs stack trace of memory allocation within these
+      ranges. Format is min:max,min:max,....); default: "";
+    --bind (Bind address. If empty - binds on all interfaces. It's not advised
+      due to security implications.); default: "";
+    --force_epoll (If true - uses linux epoll engine underneath. Can fit for
+      kernels older than 5.10.); default: false;
+    --omit_basic_usage (Omit printing basic usage info.); default: false;
+    --pidfile (If not empty - server writes its pid into the file); default: "";
+    --tcp_backlog (TCP listen(2) backlog parameter.); default: 256;
+    --unixsocket (If not empty - specifies path for the Unix socket that will be
+      used for listening for incoming connections.); default: "";
+    --unixsocketperm (Set permissions for unixsocket, in octal value.);
+      default: "";
+    --uring_recv_buffer_cnt (How many buffer ring entries to allocate per thread
+      for io_uring receive operations. Relevant only for modern kernels with
+      io_uring enabled); default: 0;
+    --use_oah_set (If true, store SET values in OAHSet instead of StringSet.);
+      default: false;
+    --user (If not empty - drop privileges to this user (and their primary
+      group) after binding ports. Accepts username or numeric uid. If --dir is
+      set, chowns the data directory to this user.); default: "";
+    --version_check (If true, Will monitor for new releases on Dragonfly servers
+      once a day.); default: true;
+
+  Flags from server/engine_shard.cc:
+    --background_heartbeat (Whether to run heartbeat as a background fiber);
+      default: false;
+    --enable_heartbeat_eviction (Enable eviction during heartbeat when memory is
+      under pressure.); default: true;
+    --enable_heartbeat_rss_eviction (Enable eviction during heartbeat when rss
+      memory is under pressure. Eviction based on used_memory will still be
+      enabled.); default: true;
+    --eviction_memory_budget_threshold (Eviction starts when the free memory
+      (including RSS memory) drops below eviction_memory_budget_threshold *
+      max_memory_limit.); default: 0.1;
+    --hz (Base frequency at which the server performs other background tasks.
+      Warning: not advised to decrease in production.); default: 100;
+    --mem_defrag_check_sec_interval (Number of seconds between every
+      defragmentation necessity check); default: 60;
+    --mem_defrag_page_utilization_threshold (memory page under utilization
+      threshold. Ratio between used and committed size, below this, memory in
+      this page will defragmented); default: 0.8;
+    --mem_defrag_threshold (Minimum percentage of used memory relative to
+      maxmemory cap before running defragmentation); default: 0.7;
+    --mem_defrag_waste_threshold (The ratio of wasted/committed memory above
+      which we run defragmentation); default: 0.2;
+    --tiered_prefix (Enables tiered storage if set. The string denotes the path
+      and prefix of the files associated with tiered storage. Stronly advised to
+      use high performance NVME ssd disks for this. Also, seems that
+      pipeline_squash does not work well with tiered storage, so it's advised to
+      set it to 0.); default: "";
+
+  Flags from server/engine_shard_set.cc:
+    --cache_mode (If true, the backend behaves like a cache, by evicting entries
+      when getting close to maxmemory limit); default: false;
+    --tiered_max_file_size (Limit on maximum file size that is used by the
+      database for tiered storage. 0 - means the program will automatically
+      determine its maximum file size. default: 0); default: 0B;
+
+  Flags from server/generic_family.cc:
+    --dbnum (Number of databases); default: 16;
+    --keys_output_limit (Maximum number of keys output by keys command);
+      default: 8192;
+    --unlink_experimental_async (If true, runs unlink command asynchronously.);
+      default: true;
+
+  Flags from server/list_family.cc:
+    --list_compress_depth (Compress depth of the list. Default is no
+      compression); default: 0;
+    --list_compress_dict_threshold (Minimum list malloc usage in bytes before
+      attempting ZSTD dictionary compression. 0 disables. Note: compression is
+      synchronous and may block the thread.); default: 0;
+    --list_max_listpack_size (Maximum listpack size, default is 8kb);
+      default: -2;
+    --list_tiering_prefetch_depth (Before loading a tiered list node, scan up to
+      this many neighboring nodes and issue asynchronous load requests for any
+      that are offloaded. A value of 0 disables prefetching.); default: 0;
+    --list_tiering_threshold (Tiering threshold for lists. Default - no
+      tiering.); default: 0;
+
+  Flags from server/main_service.cc:
+    --admin_nopass (If set, would enable open admin access to console on the
+      assigned port, without authorization needed.); default: false;
+    --announce_port (Port that Dragonfly announces to cluster clients and
+      replication master); default: 0;
+    --expose_http_api (If set, will expose a POST /api handler for sending redis
+      commands as json array.); default: false;
+    --huffman_table (a comma separated map: domain1:code1,domain2:code2,...
+      where domain can currently be only KEYS or STRINGS, code is a
+      base64-encoded huffman table exported via DEBUG COMPRESSION EXPORT. if the
+      flag is empty no huffman compression is applied.); default: "";
+    --jsonpathv2 (If true uses Dragonfly jsonpath implementation, otherwise uses
+      legacy jsoncons implementation.); default: true;
+    --listpack_max_bytes (Maximum total bytes of a hash in listpack encoding
+      before converting to a hash table); default: 1024;
+    --listpack_max_field_len (Maximum length of a hash field or value to be
+      stored in listpack encoding); default: 64;
+    --lua_resp2_legacy_float (Return rounded down integers instead of floats for
+      lua scripts with RESP2); default: false;
+    --maxmemory (Limit on maximum-memory that is used by the database, until
+      data starts to be evicted (according to eviction policy). With tiering,
+      this value defines only the size in RAM, and not the whole dataset (RAM +
+      SSD). Must be *at least* 256MiB per proactor thread. Can be any
+      human‑readable bytes values (supports K/M/G/T/P/E with optional B,
+      case‑insensitive, both 'GiB' & 'GB' possible). Examples: 300000000,
+      512MB, 2G, 1.25GiB. 0 - value will be automatically defined based on the
+      env (ex: machine's capacity). default: 0); default: 0B;
+    --memcached_port (Memcached port); default: 0;
+    --multi_eval_squash_buffer (Max buffer for squashed commands per script);
+      default: 8096;
+    --multi_exec_squash (Whether multi exec will squash single shard commands to
+      optimize performance); default: true;
+    --num_shards (Number of database shards, 0 - to choose automatically);
+      default: 0;
+    --port (Redis port. 0 disables the port, -1 will bind on a random available
+      port.); default: 6379;
+    --scheduler_background_budget (Background fiber budget in nanoseconds);
+      default: 50000;
+    --scheduler_background_sleep_prob (Sleep probability of background fibers on
+      reaching budget); default: 50;
+    --scheduler_background_warrant (Percentage of guaranteed cpu time for
+      background fibers); default: 5;
+    --shard_thread_busy_polling_usec (If non-zero, overrides the busy polling
+      parameter for shard threads.); default: 0;
+    --write_connection_throttling_sleep_usec (Sleep period for write connection
+      in microseconds. 0 disables yielding.); default: 0;
+
+  Flags from server/multi_command_squasher.cc:
+    --log_squash_info_threshold_usec (Threshold in microseconds above which to
+      log squashing timings.); default: 2147483648;
+    --max_busy_squash_usec (Maximum time in microseconds to execute squashed
+      commands before yielding.); default: 1000;
+
+  Flags from server/protocol_client.cc:
+    --masterauth (password for authentication with master); default: "";
+    --masteruser (username for authentication with master); default: "";
+    --tls_replication (Enable TLS on replication); default: false;
+
+  Flags from server/rdb_load.cc:
+    --deserialize_hnsw_index (Deserialize HNSW vector index graph structure);
+      default: false;
+    --rdb_ignore_expiry (Ignore Key Expiry when loding from RDB snapshot);
+      default: false;
+    --rdb_load_dry_run (Dry run RDB load without applying changes);
+      default: false;
+
+  Flags from server/rdb_save.cc:
+    --compression_mode (set 0 for no compression,set 1 for single entry lzf
+      compression,set 2 for multi entry zstd compression on df snapshot and
+      single entry on rdb snapshot,set 3 for multi entry lz4 compression on df
+      snapshot and single entry on rdb snapshot); default: MULTI_ENTRY_LZ4;
+    --rdb_sbf_chunked (Enable new save format for saving SBFs in chunks.);
+      default: true;
+
+  Flags from server/replica.cc:
+    --break_replication_on_master_restart (When in replica mode, and master
+      restarts, break replication from master to avoid flushing the replica's
+      data.); default: false;
+    --experimental_cascaded_partial_sync (Experimental cascaded psync);
+      default: false;
+    --master_connect_timeout_ms (Timeout for establishing connection to a
+      replication master); default: 20000;
+    --master_reconnect_timeout_ms (Timeout for re-establishing connection to a
+      replication master); default: 1000;
+    --replica_announce_ip (IP address that Dragonfly announces to replication
+      master); default: "";
+    --replica_partial_sync (Use partial sync to reconnect when a replica
+      connection is interrupted.); default: true;
+    --replica_priority (Published by info command for sentinel to pick replica
+      based on score during a failover); default: 100;
+    --replication_acks_interval (Interval between acks in milliseconds.);
+      default: 1000;
+
+  Flags from server/script_mgr.cc:
+    --default_lua_flags (Configure default flags for running Lua scripts:
+      - Use 'allow-undeclared-keys' to allow accessing undeclared keys,
+      - Use 'disable-atomicity' to allow running scripts non-atomically,
+      - Use 'legacy-float' to return floats as integers.
+      Specify multiple values separated by space, for example
+      'allow-undeclared-keys disable-atomicity' runs scripts non-atomically and
+      allows accessing undeclared keys); default: "";
+    --lua_allow_undeclared_auto_correct (If enabled, when a script that is not
+      allowed to run with undeclared keys is trying to access undeclared keys,
+      automaticaly set the script flag to be able to run with undeclared key.);
+      default: false;
+    --lua_auto_async (If enabled, call/pcall with discarded values are
+      automatically replaced with acall/apcall.); default: false;
+    --lua_float_as_int_shas (Comma-separated list of Lua script SHAs which
+      should return floats as integers. SHAs are only looked at when loading the
+      script.); default: ;
+    --lua_undeclared_keys_shas (Comma-separated list of Lua script SHAs which
+      are allowed to access undeclared keys. SHAs are only looked at when
+      loading the script, and new values do not affect already-loaded script.);
+      default: ;
+
+  Flags from server/server_family.cc:
+    --availability_zone (server availability zone, used by clients to read from
+      local-zone replicas); default: "";
+    --dbfilename (the filename to save/load the DB, instead of/with {timestamp}
+      can be used {Y}, {m}, and {d} macros); default: "dump-{timestamp}";
+    --df_snapshot_format (if true, save in dragonfly-specific snapshotting
+      format); default: true;
+    --dir (working directory); default: "";
+    --epoll_file_threads (thread size for file workers when running in epoll
+      mode, default is hardware concurrent threads); default: 0;
+    --info_replication_valkey_compatible (when true - output valkey compatible
+      values for info-replication); default: true;
+    --keep_legacy_memory_metrics (legacy metrics format); default: false;
+    --managed_service_info (Hides some implementation details from users when
+      true (i.e. in managed service env)); default: false;
+    --maxclients (Maximum number of concurrent clients allowed.);
+      default: 64000;
+    --pause_wait_timeout (Timeout in seconds, to set up the pause for all
+      connections for CLIENT PAUSE command and cluster slot migration
+      finalization procedure.); default: 1;
+    --replicaof (Specifies a host and port which point to a target master to
+      replicate. Format should be <IPv4>:<PORT> or host:<PORT> or
+      [<IPv6>]:<PORT>); default: ;
+    --replicaof_no_one_start_journal (when set, preserves journal offsets after
+      REPLICAOF NO ONE); default: true;
+    --requirepass (password for AUTH authentication. If empty can also be set
+      with DFLY_PASSWORD environment variable.); default: "";
+    --s3_ec2_metadata (whether to load credentials and configuration from EC2
+      metadata); default: false;
+    --s3_endpoint (endpoint for s3 snapshots, default uses aws regional
+      endpoint); default: "";
+    --s3_sign_payload (whether to sign the s3 request payload when uploading
+      snapshots); default: true;
+    --s3_use_https (whether to use https for s3 endpoints); default: true;
+    --save_schedule (the flag is deprecated, please use snapshot_cron instead);
+      default: "";
+    --slowlog_log_slower_than (Add commands slower than this threshold to slow
+      log. The value is expressed in microseconds and if it's negative -
+      disables the slowlog.); default: 10000;
+    --slowlog_max_len (Slow log maximum length.); default: 20;
+    --snapshot_cron (cron expression for the time to save a snapshot, crontab
+      style); default: ;
+
+  Flags from server/server_state.cc:
+    --interpreter_per_thread (Lua interpreters per thread); default: 10;
+    --max_squashed_cmd_num (Max number of commands squashed in a single shard
+      during squash optimizaiton); default: 100;
+    --rss_oom_deny_ratio (When the ratio between maxmemory and RSS memory
+      exceeds this value, commands marked as DENYOOM will fail with OOM error
+      and new connections to non-admin port will be rejected. Negative value
+      disables this feature.); default: 1.25;
+    --send_timeout (Close the connection after it is stuck on send for N seconds
+      (0 to disable)); default: 0;
+    --serialization_max_chunk_size (Maximum size of a value that may be
+      serialized at once during snapshotting or full sync. Values bigger than
+      this threshold will be serialized using streaming serialization. 0 - to
+      disable streaming mode); default: 65536;
+    --snapshot_egress_limit_bytes (Per-shard-thread socket egress bandwidth
+      budget in bytes/second. Each shard throttles its snapshot traversal loop
+      to stay under this rate. Accepts human-readable sizes (e.g. 100mb, 1gb). 0
+      disables throttling.); default: 0B;
+    --timeout (Close the connection after it is idle for N seconds (0 to
+      disable)); default: 0;
+
+  Flags from server/sharding.cc:
+    --shard_round_robin_prefix (Deprecated -- will be removed); default: "";
+
+  Flags from server/snapshot.cc:
+    --background_snapshotting (Whether to run snapshot as a background fiber);
+      default: false;
+    --serialization_tagged_chunks (Allow serializer output to be split into
+      tagged chunks and reassembled by receiver); default: true;
+    --serialize_hnsw_index (Serialize HNSW vector index graph structure);
+      default: false;
+
+  Flags from server/string_family.cc:
+    --get_zero_copy (If true, GET returns a borrowed view into the CompactObj
+      raw payload (zero-copy) for large raw strings; if false, falls back to the
+      materializing path. Toggle to A/B benchmark the zero-copy GET path.);
+      default: true;
+    --mget_dedup_keys (If true, MGET will deduplicate keys); default: false;
+
+  Flags from server/tiered_storage.cc:
+    --tiered_defrag_scan_budget_us (Base cpu time-slice in microseconds granted
+      to a single background defragmentation scan. Scales up to 3x this value
+      with the amount of fragmentation found. Set to 0 to disable
+      defragmentation scans); default: 2;
+    --tiered_experimental_cooling (If true, uses intermediate cooling layer when
+      offloading values to storage); default: true;
+    --tiered_experimental_hash_support (Experimental hash datatype offloading);
+      default: false;
+    --tiered_experimental_list_support (Experimental list node offloading);
+      default: false;
+    --tiered_max_pending_bytes (Cap on the total volume of in-flight bytes to
+      the tiered (disk) device, counting both reads and writes. Governs stash
+      write backpressure, and throttles background serialization
+      (snapshot/migration) and defragmentation while the device is overloaded,
+      so those do not starve client reads.); default: 256.0KiB;
+    --tiered_max_pending_defrags (Maximum number of concurrent defragmentation
+      read operations); default: 20;
+    --tiered_min_ttl_to_offload_ms (Min remaining TTL in ms for a value to be
+      eligible for offloading); default: 5000;
+    --tiered_min_value_size (Minimum size of values eligible for offloading.
+      Must be at least 64); default: 64;
+    --tiered_offload_scan_budget_us (Base cpu time-slice in microseconds granted
+      to a single background offloading scan. Set to 0 to disable offloading
+      scans); default: 100;
+    --tiered_offload_threshold (Ratio of free memory (free/max memory) below
+      which offloading starts); default: 0.5;
+    --tiered_repack_acceptable_waste (How many more disk pages than the
+      theoretical minimum a bucket may spread its small values over before the
+      repack scan regroups it); default: 2;
+    --tiered_repack_max_reads (Maximum number of concurrent page reads a single
+      repack scan may issue); default: 10;
+    --tiered_repack_scan_budget_us (Base cpu time-slice in microseconds granted
+      to a single background bin-bucket repack scan, which regroups small
+      offloaded values scattered across disk pages. Set to 0 (default) to
+      disable repack scans); default: 0;
+    --tiered_upload_threshold (Ratio of free memory (free/max memory) below
+      which uploading stops); default: 0.1;
+
+  Flags from server/transaction.cc:
+    --tx_queue_warning_len (Length threshold for warning about long transaction
+      queue); default: 96;
+
+
+  Flags from server/acl/acl_family.cc:
+    --aclfile (Path and name to aclfile); default: "";
+
+  Flags from server/acl/acl_log.cc:
+    --acllog_max_len (Specify the number of log entries. Logs are kept locally
+      for each thread and therefore the total number of entries are
+      acllog_max_len * threads); default: 32;
+
+
+  Flags from server/cluster/cluster_family.cc:
+    --cluster_announce_ip (IP address that Dragonfly announces to cluster
+      clients); default: "";
+    --cluster_node_id (ID within a cluster, used for slot assignment. MUST be
+      unique. If empty, uses master replication ID (random string));
+      default: "";
+
+  Flags from server/cluster/coordinator.cc:
+    --cluster_coordinator_connect_timeout_ms (Timeout in milliseconds for
+      coordinator to connect to remote shards); default: 3000;
+    --cluster_coordinator_response_timeout_ms (Timeout in milliseconds for
+      coordinator to read responses from remote shards); default: 3000;
+
+  Flags from server/cluster/incoming_slot_migration.cc:
+    --slot_migration_throttle_us (Incoming migration throttle time in us, we
+      throttle every 100us of migration commands processing, 0 to disable.
+      Recommended value is 20. Values more than 50 can significantly reduce
+      migration speed.); default: 0;
+
+  Flags from server/cluster/outgoing_slot_migration.cc:
+    --migration_finalization_timeout_ms (Timeout for migration finalization
+      operation); default: 30000;
+    --slot_migration_connection_timeout_ms (Connection creating timeout for
+      migration operations); default: 2000;
+
+
+  Flags from server/detail/compressor.cc:
+    --compression_level (The compression level to use on zstd/lz4 compression);
+      default: 2;
+
+  Flags from server/detail/snapshot_storage.cc:
+    --s3_use_helio_client (If true, use helio's native S3 client; if false, use
+      aws-sdk-cpp); default: true;
+
+
+  Flags from server/journal/journal_slice.cc:
+    --shard_repl_backlog_len (The length of the circular replication log per
+      shard); default: 8192;
+
+  Flags from server/journal/streamer.cc:
+    --migration_buckets_cpu_budget (How much CPU budget to use for migration
+      buckets serialization); default: 0.2;
+    --migration_buckets_serialization_threshold (The Number of buckets to
+      serialize on each iteration before yielding); default: 10;
+    --migration_buckets_sleep_usec (Sleep time in microseconds after each time
+      we reach migration_buckets_serialization_threshold); default: 500;
+    --replication_dispatch_threshold (Number of bytes to aggregate before
+      replication); default: 1500;
+    --replication_stream_output_limit (Time to wait for the replication output
+      buffer go below the throttle limit); default: 1048576;
+    --replication_timeout (Time in milliseconds to wait for the replication
+      writes being stuck.); default: 30000;
+
+
+  Flags from server/search/search_family.cc:
+    --MAXSEARCHRESULTS (Maximum number of results from ft.search command);
+      default: 1000000;
+    --cluster_search (Enable search commands for cross-shard search. turned off
+      by default for safety.); default: false;
+    --search_query_string_bytes (Maximum number of bytes in search query
+      string); default: 10240;
+    --search_reject_legacy_field (FT.AGGREGATE: Reject legacy field names.);
+      default: true;
+    --subset_knn_search_threshold (If prefilter results are below this
+      threshold, we will do exact subset search instead of HNSW graph search);
+      default: 8192;
+
+
+  Flags from server/tiering/disk_storage.cc:
+    --backing_file_direct (If true uses O_DIRECT to open backing files);
+      default: true;
+    --registered_buffer_size (Size of registered buffer for IoUring fixed
+      read/writes); default: 524288;
+    --tiering_disk_storage_initial_size (Initial disk storage size.);
+      default: 256.00MiB;
+
+
+  Flags from helio/util/cloud/gcp/gcs.cc:
+    --gcs_auth_token (); default: "";
+
+  Flags from helio/util/cloud/gcp/gcs_file.cc:
+    --gcs_dry_upload (); default: false;
+
+
+  Flags from helio/util/fibers/proactor_pool.cc:
+    --proactor_affinity_mode (can be on, off or auto); default: "on";
+    --proactor_threads (Number of io threads in the pool); default: 0;
+
+  Flags from helio/util/fibers/uring_proactor.cc:
+    --uring_direct_table_len (If positive create direct fd table of this
+      length); default: 0;
+    --uring_disable_iowait (If true, disables iowait cpu accounting);
+      default: false;
+
+
+  Flags from helio/util/fibers/detail/fiber_interface.cc:
+    --fiber_run_warning_threshold_ms (If greater than 0, will warn if a fiber
+      runs longer than this threshold. ); default: 0;
+    --fiber_safety_margin (If > 0, ensures the stack each fiber has at least
+      this margin. The check is done at fiber destruction time.); default: 1024;
+
+
+  Flags from abseil_cpp-src/absl/flags/parse.cc:
+    --flagfile (comma-separated list of files to load flags from); default: ;
+    --fromenv (comma-separated list of flags to set from the environment [use
+      'export FLAGS_flag1=value']); default: ;
+    --tryfromenv (comma-separated list of flags to try to set from the
+      environment if present); default: ;
+    --undefok (comma-separated list of flag names that it is okay to specify on
+      the command line even if the program does not define a flag with that
+      name); default: ;
+
+
+  Flags from glog-src/src/logging.cc:
+    --alsologtoemail (log messages go to these email addresses in addition to
+      logfiles); default: "";
+    --alsologtostderr (log messages go to stderr in addition to logfiles);
+      default: false;
+    --colorlogtostderr (color messages logged to stderr (if supported by
+      terminal)); default: false;
+    --colorlogtostdout (color messages logged to stdout (if supported by
+      terminal)); default: false;
+    --drop_log_memory (Drop in-memory buffers of log contents. Logs can grow
+      very quickly and they are rarely read before they need to be evicted from
+      memory. Instead, drop them from memory as soon as they are flushed to
+      disk.); default: true;
+    --log_backtrace_at (Emit a backtrace when logging at file:linenum.);
+      default: "";
+    --log_dir (If specified, logfiles are written into this directory instead of
+      the default logging directory.); default: "";
+    --log_link (Put additional links to the log files in this directory);
+      default: "";
+    --log_prefix (Prepend the log prefix to the start of each log line);
+      default: true;
+    --log_utc_time (Use UTC time for logging.); default: false;
+    --log_year_in_prefix (Include the year in the log prefix); default: true;
+    --logbuflevel (Buffer log messages logged at this level or lower (-1 means
+      don't buffer; 0 means buffer INFO only; ...)); default: 0;
+    --logbufsecs (Buffer log messages for at most this many seconds);
+      default: 30;
+    --logcleansecs (Clean overdue logs every this many seconds); default: 300;
+    --logemaillevel (Email log messages logged at this level or higher (0 means
+      email all; 3 means email FATAL only; ...)); default: 999;
+    --logfile_mode (Log file mode/permissions.); default: 436;
+    --logmailer (Mailer used to send logging email); default: "";
+    --logtostderr (log messages go to stderr instead of logfiles);
+      default: false; currently: true;
+    --logtostdout (log messages go to stdout instead of logfiles);
+      default: false;
+    --max_log_size (approx. maximum log file size (in MB). A value of 0 will be
+      silently overridden to 1.); default: 1800;
+    --minloglevel (Messages logged at a lower level than this don't actually get
+      logged anywhere); default: 0;
+    --stderrthreshold (log messages at or above this level are copied to stderr
+      in addition to logfiles. This flag obsoletes --alsologtostderr.);
+      default: 2;
+    --stop_logging_if_full_disk (Stop attempting to log to disk if the disk is
+      full.); default: false;
+    --timestamp_in_logfile_name (put a timestamp at the end of the log file
+      name); default: true;
+
+  Flags from glog-src/src/utilities.cc:
+    --symbolize_stacktrace (Symbolize the stack trace in the tombstone);
+      default: true;
+
+  Flags from glog-src/src/vlog_is_on.cc:
+    --v (Show all VLOG(m) messages for m <= this. Overridable by --vmodule.);
+      default: 0;
+    --vmodule (per-module verbose level. Argument is a comma-separated list of
+      <module name>=<log level>. <module name> is a glob pattern, matched
+      against the filename base (that is, name ignoring .cc/.h./-inl.h). <log
+      level> overrides any value given by --v.); default: "";
+
+Try --helpfull to get a list of all flags or --help=substring shows help for
+flags which include specified substring in either in the name, or description or
+path.

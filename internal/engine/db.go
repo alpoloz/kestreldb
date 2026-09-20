@@ -1,154 +1,154 @@
 package engine
 
-import "sync"
+import (
+	"sync"
+	"time"
+)
 
+const defaultShardCount = 64
+
+// DB is the top-level in-memory store. Public databases own a fixed set of
+// shards; the shard DBs themselves contain one canonical keyspace each.
 type DB struct {
-	mu     sync.RWMutex
-	hashes map[string]map[string]string
-	zsets  map[string]*ZSet
+	gate               sync.RWMutex
+	waitMu             sync.Mutex
+	shards             []*DB
+	mu                 dbMutex
+	entries            map[string]*entry
+	listWaiters        map[string][]*listWaiter
+	waitersClosed      bool
+	now                func() time.Time
+	expiring           map[string]int64
+	expiringHashFields map[hashFieldRef]int64
+	expiringSetMembers map[setMemberRef]int64
+	expirationTurn     uint8
+	expirationShard    uint32
+	expirationStop     chan struct{}
+	expirationDone     chan struct{}
+	journal            *mutationJournal
+	aof                *aofFile
 }
 
 func NewDB() *DB {
-	return &DB{
-		hashes: make(map[string]map[string]string),
-		zsets:  make(map[string]*ZSet),
-	}
+	return NewDBWithClock(time.Now)
 }
 
-func (db *DB) HSet(key string, field string, value string) int {
+func NewDBWithClock(now func() time.Time) *DB {
+	if now == nil {
+		now = time.Now
+	}
+	db := newCoreDB(now)
+	db.shards = make([]*DB, defaultShardCount)
+	for i := range db.shards {
+		db.shards[i] = newCoreDB(now)
+	}
+	return db
+}
+
+func newCoreDB(now func() time.Time) *DB {
+	if now == nil {
+		now = time.Now
+	}
+	db := &DB{
+		entries:            make(map[string]*entry),
+		listWaiters:        make(map[string][]*listWaiter),
+		now:                now,
+		expiring:           make(map[string]int64),
+		expiringHashFields: make(map[hashFieldRef]int64),
+		expiringSetMembers: make(map[setMemberRef]int64),
+	}
+	db.mu.owner = db
+	return db
+}
+
+// Type returns the kind stored at key, or KindNone when the key does not exist.
+func (db *DB) Type(key string) Kind {
+	if db.shards != nil {
+		release := db.operationGate()
+		defer release()
+		return db.shardFor(key).Type(key)
+	}
 	db.mu.Lock()
 	defer db.mu.Unlock()
-
-	h, ok := db.hashes[key]
+	db.purgeExpiredLocked()
+	e, ok := db.entryLocked(key)
 	if !ok {
-		h = make(map[string]string)
-		db.hashes[key] = h
+		return KindNone
 	}
-	_, exists := h[field]
-	h[field] = value
-	if exists {
-		return 0
-	}
-	return 1
+	return e.kind
 }
 
-func (db *DB) HGet(key string, field string) (string, bool) {
-	db.mu.RLock()
-	defer db.mu.RUnlock()
-
-	h, ok := db.hashes[key]
-	if !ok {
-		return "", false
+// Del removes keys regardless of their value type and returns the number of
+// keys that existed.
+func (db *DB) Del(keys ...string) int {
+	if db.shards != nil {
+		var removed int
+		db.withView(keys, func(view *DB) { removed = view.Del(keys...) })
+		return removed
 	}
-	v, ok := h[field]
-	return v, ok
-}
-
-func (db *DB) HDel(key string, field string) int {
 	db.mu.Lock()
 	defer db.mu.Unlock()
-
-	h, ok := db.hashes[key]
-	if !ok {
-		return 0
+	db.purgeExpiredLocked()
+	removed := 0
+	for _, key := range keys {
+		if db.deleteLocked(key) {
+			removed++
+		}
 	}
-	if _, exists := h[field]; !exists {
-		return 0
-	}
-	delete(h, field)
-	if len(h) == 0 {
-		delete(db.hashes, key)
-	}
-	return 1
+	return removed
 }
 
-func (db *DB) HLen(key string) int {
-	db.mu.RLock()
-	defer db.mu.RUnlock()
-
-	h, ok := db.hashes[key]
-	if !ok {
-		return 0
+// Exists returns how many of keys exist. Repeated keys are counted repeatedly,
+// matching Redis EXISTS semantics.
+func (db *DB) Exists(keys ...string) int {
+	if db.shards != nil {
+		var found int
+		db.withView(keys, func(view *DB) { found = view.Exists(keys...) })
+		return found
 	}
-	return len(h)
-}
-
-func (db *DB) HGetAll(key string) map[string]string {
-	db.mu.RLock()
-	defer db.mu.RUnlock()
-
-	h, ok := db.hashes[key]
-	if !ok {
-		return map[string]string{}
-	}
-	out := make(map[string]string, len(h))
-	for k, v := range h {
-		out[k] = v
-	}
-	return out
-}
-
-func (db *DB) ZAdd(key string, score float64, member string) int {
 	db.mu.Lock()
 	defer db.mu.Unlock()
-
-	zs, ok := db.zsets[key]
-	if !ok {
-		zs = NewZSet()
-		db.zsets[key] = zs
+	db.purgeExpiredLocked()
+	found := 0
+	for _, key := range keys {
+		if _, ok := db.entryLocked(key); ok {
+			found++
+		}
 	}
-	if zs.Add(score, member) {
-		return 1
-	}
-	return 0
+	return found
 }
 
-func (db *DB) ZRem(key string, member string) int {
-	db.mu.Lock()
-	defer db.mu.Unlock()
-
-	zs, ok := db.zsets[key]
+func (db *DB) entryLocked(key string) (*entry, bool) {
+	e, ok := db.entries[key]
 	if !ok {
-		return 0
+		return nil, false
 	}
-	if !zs.Remove(member) {
-		return 0
+	if e.expireAt > 0 && e.expireAt <= db.now().UnixMilli() {
+		db.removeEntryLocked(key)
+		return nil, false
 	}
-	if zs.Len() == 0 {
-		delete(db.zsets, key)
-	}
-	return 1
+	return e, true
 }
 
-func (db *DB) ZScore(key string, member string) (float64, bool) {
-	db.mu.RLock()
-	defer db.mu.RUnlock()
-
-	zs, ok := db.zsets[key]
-	if !ok {
-		return 0, false
+func (db *DB) deleteLocked(key string) bool {
+	if _, ok := db.entryLocked(key); !ok {
+		return false
 	}
-	return zs.Score(member)
+	db.removeEntryLocked(key)
+	return true
 }
 
-func (db *DB) ZCard(key string) int {
-	db.mu.RLock()
-	defer db.mu.RUnlock()
-
-	zs, ok := db.zsets[key]
-	if !ok {
-		return 0
+func (db *DB) removeEntryLocked(key string) {
+	delete(db.entries, key)
+	delete(db.expiring, key)
+	for ref := range db.expiringHashFields {
+		if ref.key == key {
+			delete(db.expiringHashFields, ref)
+		}
 	}
-	return zs.Len()
-}
-
-func (db *DB) ZRange(key string, start int, stop int) []ZSetItem {
-	db.mu.RLock()
-	defer db.mu.RUnlock()
-
-	zs, ok := db.zsets[key]
-	if !ok {
-		return nil
+	for ref := range db.expiringSetMembers {
+		if ref.key == key {
+			delete(db.expiringSetMembers, ref)
+		}
 	}
-	return zs.Range(start, stop)
 }
