@@ -24,6 +24,13 @@ var (
 	ErrInvalidFloat   = errors.New("value is not a valid float")
 	ErrInvalidOffset  = errors.New("offset is out of range")
 	ErrInvalidOptions = errors.New("incompatible options")
+
+	// ErrNoSuchKey is returned when an operation requires an existing source.
+	ErrNoSuchKey = errors.New("no such key")
+
+	// ErrSameKey is returned when an operation requires distinct source and
+	// destination keys.
+	ErrSameKey = errors.New("source and destination objects are the same")
 )
 
 // Kind identifies the value type stored at a key.
@@ -60,7 +67,8 @@ func (k Kind) String() string {
 // entry is the canonical value stored for a key. Value's concrete type is
 // determined by Kind and is only accessed while DB.mu is held.
 type entry struct {
-	kind     Kind
-	value    any
-	expireAt int64
+	kind       Kind
+	value      any
+	expireAt   int64
+	lastAccess int64
 }

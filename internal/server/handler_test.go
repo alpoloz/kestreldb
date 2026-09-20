@@ -29,6 +29,46 @@ func TestGenericCommandsAndWrongTypeResponse(t *testing.T) {
 	assertIntResponse(t, runCommand(t, h, "ZADD", "key", "1", "member"), 1)
 }
 
+func TestExtendedGenericKeyCommands(t *testing.T) {
+	h := &handler{db: engine.NewDB()}
+
+	assertStringResponse(t, runCommand(t, h, "SET", "source", "one"), "OK")
+	assertStringResponse(t, runCommand(t, h, "SET", "occupied", "two"), "OK")
+	assertIntResponse(t, runCommand(t, h, "RENAMENX", "source", "occupied"), 0)
+	assertStringResponse(t, runCommand(t, h, "RENAME", "source", "renamed"), "OK")
+	assertIntResponse(t, runCommand(t, h, "COPY", "renamed", "copied", "DB", "0"), 1)
+	assertIntResponse(t, runCommand(t, h, "COPY", "renamed", "copied"), 0)
+	assertIntResponse(t, runCommand(t, h, "COPY", "renamed", "copied", "REPLACE"), 1)
+	assertIntResponse(t, runCommand(t, h, "TOUCH", "renamed", "missing", "renamed"), 2)
+	assertIntResponse(t, runCommand(t, h, "DBSIZE"), 3)
+	assertBlobValues(t, runCommand(t, h, "KEYS", "*ed"), "copied", "occupied", "renamed")
+
+	firstPage := runCommand(t, h, "SCAN", "0", "COUNT", "1", "MATCH", "z*")
+	if firstPage.Type != proto.RArray || len(firstPage.Elements) != 2 || firstPage.Elements[0].Str == "0" || len(firstPage.Elements[1].Elements) != 0 {
+		t.Fatalf("filtered SCAN response = %#v", firstPage)
+	}
+	typed := runCommand(t, h, "SCAN", "0", "COUNT", "100", "TYPE", "string")
+	if typed.Type != proto.RArray || len(typed.Elements) != 2 || typed.Elements[0].Str != "0" || len(typed.Elements[1].Elements) != 3 {
+		t.Fatalf("typed SCAN response = %#v", typed)
+	}
+
+	asyncFlush := runCommand(t, h, "FLUSHDB", "ASYNC")
+	if asyncFlush.Type != proto.RError || asyncFlush.Str != "ERR asynchronous FLUSHDB is not supported" {
+		t.Fatalf("asynchronous FLUSHDB response = %#v", asyncFlush)
+	}
+	assertStringResponse(t, runCommand(t, h, "FLUSHDB", "SYNC"), "OK")
+	assertIntResponse(t, runCommand(t, h, "DBSIZE"), 0)
+
+	missingRename := runCommand(t, h, "RENAME", "missing", "destination")
+	if missingRename.Type != proto.RError || missingRename.Str != "ERR no such key" {
+		t.Fatalf("missing RENAME response = %#v", missingRename)
+	}
+	sameCopy := runCommand(t, h, "COPY", "same", "same")
+	if sameCopy.Type != proto.RError || sameCopy.Str != "ERR source and destination objects are the same" {
+		t.Fatalf("same-key COPY response = %#v", sameCopy)
+	}
+}
+
 func TestExtendedHashCommands(t *testing.T) {
 	h := &handler{db: engine.NewDB()}
 

@@ -7,6 +7,8 @@ type ScanOptions struct {
 	Count    int
 	Match    string
 	UseMatch bool
+	Type     string
+	UseType  bool
 }
 
 const defaultScanCount = 10

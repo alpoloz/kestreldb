@@ -180,6 +180,82 @@ func (h *handler) dispatchContext(
 		}
 		return false, w.WriteInt(h.db.Exists(args...))
 
+	case "RENAME", "RENAMENX":
+		if err := exact(cmd, args, 2); err != nil {
+			return false, err
+		}
+		renamed, err := h.db.Rename(args[0], args[1], cmd == "RENAMENX")
+		if err != nil {
+			return false, err
+		}
+		if cmd == "RENAMENX" {
+			return false, w.WriteInt(boolInt(renamed))
+		}
+		return false, w.WriteSimpleString("OK")
+
+	case "COPY":
+		if len(args) < 2 {
+			return false, fmt.Errorf("%s requires at least 2 arg(s), got %d", cmd, len(args))
+		}
+		replace, err := parseCopyOptions(args[2:])
+		if err != nil {
+			return false, err
+		}
+		copied, err := h.db.Copy(args[0], args[1], replace)
+		if err != nil {
+			return false, err
+		}
+		return false, w.WriteInt(boolInt(copied))
+
+	case "TOUCH":
+		if err := atLeast(cmd, args, 1); err != nil {
+			return false, err
+		}
+		return false, w.WriteInt(h.db.Touch(args...))
+
+	case "DBSIZE":
+		if err := exact(cmd, args, 0); err != nil {
+			return false, err
+		}
+		return false, w.WriteInt(h.db.DBSize())
+
+	case "FLUSHDB":
+		if len(args) > 1 || len(args) == 1 && !strings.EqualFold(args[0], "SYNC") && !strings.EqualFold(args[0], "ASYNC") {
+			return false, errors.New("syntax error")
+		}
+		if len(args) == 1 && strings.EqualFold(args[0], "ASYNC") {
+			return false, errors.New("asynchronous FLUSHDB is not supported")
+		}
+		h.db.FlushDB()
+		return false, w.WriteSimpleString("OK")
+
+	case "KEYS":
+		if err := exact(cmd, args, 1); err != nil {
+			return false, err
+		}
+		return false, writeBlobArray(w, h.db.Keys(args[0]))
+
+	case "SCAN":
+		if err := atLeast(cmd, args, 1); err != nil {
+			return false, err
+		}
+		cursor, err := strconv.ParseUint(args[0], 10, 64)
+		if err != nil {
+			return false, engine.ErrInvalidInteger
+		}
+		options, err := parseScanOptions(args[1:], true)
+		if err != nil {
+			return false, err
+		}
+		next, keys := h.db.Scan(cursor, options)
+		if err := w.WriteArrayHeader(2); err != nil {
+			return false, err
+		}
+		if err := w.WriteBlobString([]byte(strconv.FormatUint(next, 10))); err != nil {
+			return false, err
+		}
+		return false, writeBlobArray(w, keys)
+
 	case "EXPIRE", "PEXPIRE", "EXPIREAT", "PEXPIREAT":
 		if len(args) < 2 || len(args) > 3 {
 			return false, fmt.Errorf("%s requires 2 or 3 args, got %d", cmd, len(args))
@@ -953,7 +1029,7 @@ func (h *handler) dispatchContext(
 		if err != nil {
 			return false, engine.ErrInvalidInteger
 		}
-		options, err := parseScanOptions(args[2:])
+		options, err := parseScanOptions(args[2:], false)
 		if err != nil {
 			return false, err
 		}
@@ -1139,7 +1215,7 @@ func (h *handler) dispatchContext(
 		if err != nil {
 			return false, engine.ErrInvalidInteger
 		}
-		options, err := parseScanOptions(args[2:])
+		options, err := parseScanOptions(args[2:], false)
 		if err != nil {
 			return false, err
 		}
@@ -1542,7 +1618,7 @@ func (h *handler) dispatchContext(
 		if err != nil {
 			return false, engine.ErrInvalidInteger
 		}
-		options, err := parseScanOptions(args[2:])
+		options, err := parseScanOptions(args[2:], false)
 		if err != nil {
 			return false, err
 		}
@@ -1779,7 +1855,7 @@ func writeInt64Array(w *proto.Writer, values []int64) error {
 	return nil
 }
 
-func parseScanOptions(args []string) (engine.ScanOptions, error) {
+func parseScanOptions(args []string, allowType bool) (engine.ScanOptions, error) {
 	options := engine.ScanOptions{}
 	for index := 0; index < len(args); index += 2 {
 		if index+1 >= len(args) {
@@ -1795,11 +1871,56 @@ func parseScanOptions(args []string) (engine.ScanOptions, error) {
 				return engine.ScanOptions{}, engine.ErrInvalidInteger
 			}
 			options.Count = count
+		case "TYPE":
+			if !allowType {
+				return engine.ScanOptions{}, errors.New("syntax error")
+			}
+			options.Type = strings.ToLower(args[index+1])
+			options.UseType = true
 		default:
 			return engine.ScanOptions{}, errors.New("syntax error")
 		}
 	}
 	return options, nil
+}
+
+func parseCopyOptions(args []string) (bool, error) {
+	replace := false
+	replaceSeen := false
+	databaseSeen := false
+	for index := 0; index < len(args); index++ {
+		switch strings.ToUpper(args[index]) {
+		case "REPLACE":
+			if replaceSeen {
+				return false, errors.New("syntax error")
+			}
+			replace = true
+			replaceSeen = true
+		case "DB":
+			if databaseSeen || index+1 >= len(args) {
+				return false, errors.New("syntax error")
+			}
+			database, err := strconv.ParseInt(args[index+1], 10, 64)
+			if err != nil {
+				return false, engine.ErrInvalidInteger
+			}
+			if database != 0 {
+				return false, errors.New("only database 0 is supported")
+			}
+			databaseSeen = true
+			index++
+		default:
+			return false, errors.New("syntax error")
+		}
+	}
+	return replace, nil
+}
+
+func boolInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 func parseSetOptions(args []string, nowMillis int64) (engine.SetOptions, error) {
