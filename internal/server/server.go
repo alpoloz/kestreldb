@@ -26,6 +26,7 @@ type Server struct {
 	replicaStop   context.CancelFunc
 	replicas      map[string]replicaStatus
 	replicaOffset uint64
+	cluster       *clusterState
 }
 
 func New(addr string, db *engine.DB) *Server {

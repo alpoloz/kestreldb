@@ -2,7 +2,9 @@ package engine
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
+	"hash/crc32"
 	"os"
 	"path/filepath"
 	"testing"
@@ -112,6 +114,130 @@ func TestJournalAndAOFRecovery(t *testing.T) {
 		t.Fatalf("recovered offset = %d", recovered.JournalOffset())
 	}
 	if err := recovered.CloseAOF(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSnapshotLargeValueAndSizeBoundary(t *testing.T) {
+	const largeValueSize = 8 << 20
+	value := bytes.Repeat([]byte{0, 1, 2, 0xff}, largeValueSize/4)
+	db := NewDB()
+	db.Set("large", value)
+	data, err := db.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored := NewDB()
+	if err := restored.LoadSnapshot(data); err != nil {
+		t.Fatal(err)
+	}
+	got, found, err := restored.Get("large")
+	if err != nil || !found || !bytes.Equal(got, value) {
+		t.Fatalf("large value round trip = %d bytes, %v, %v", len(got), found, err)
+	}
+
+	path := filepath.Join(t.TempDir(), "oversized.snapshot")
+	header := make([]byte, 16)
+	copy(header, snapshotMagic)
+	binary.BigEndian.PutUint32(header[8:12], uint32(maxDiskImage+1))
+	if err := os.WriteFile(path, header, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := restored.LoadSnapshotFile(path); !errors.Is(err, ErrCorruptData) {
+		t.Fatalf("oversized snapshot error = %v", err)
+	}
+}
+
+func TestAOFFsyncPoliciesAndCleanShutdown(t *testing.T) {
+	policies := []struct {
+		name   string
+		policy FsyncPolicy
+	}{
+		{name: "always", policy: FsyncAlways},
+		{name: "everysec", policy: FsyncEverySecond},
+		{name: "no", policy: FsyncNever},
+	}
+	for _, test := range policies {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "data.aof")
+			db := NewDB()
+			if err := db.OpenAOF(path, test.policy); err != nil {
+				t.Fatal(err)
+			}
+			db.Set("policy", []byte(test.name))
+			if err := db.CloseAOF(); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.CloseAOF(); err != nil {
+				t.Fatalf("second close: %v", err)
+			}
+
+			recovered := NewDB()
+			if err := recovered.OpenAOF(path, FsyncNever); err != nil {
+				t.Fatal(err)
+			}
+			value, found, err := recovered.Get("policy")
+			if err != nil || !found || string(value) != test.name {
+				t.Fatalf("recovered value = %q, %v, %v", value, found, err)
+			}
+			if err := recovered.CloseAOF(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestAOFRejectsCompleteCorruptionAndOffsetGap(t *testing.T) {
+	source := NewDB()
+	source.Set("key", []byte("value"))
+	image, err := source.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("checksum", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "checksum.aof")
+		writeTestAOFRecord(t, path, 1, image, crc32.ChecksumIEEE(image)+1)
+		db := NewDB()
+		if err := db.OpenAOF(path, FsyncNever); !errors.Is(err, ErrCorruptData) {
+			t.Fatalf("checksum error = %v", err)
+		}
+	})
+
+	t.Run("offset gap", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "gap.aof")
+		writeTestAOFRecord(t, path, 2, image, crc32.ChecksumIEEE(image))
+		db := NewDB()
+		if err := db.OpenAOF(path, FsyncNever); !errors.Is(err, ErrCorruptData) {
+			t.Fatalf("offset-gap error = %v", err)
+		}
+	})
+
+	t.Run("oversized record", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "oversized.aof")
+		data := make([]byte, 24)
+		copy(data, aofMagic)
+		binary.BigEndian.PutUint64(data[8:16], 1)
+		binary.BigEndian.PutUint32(data[16:20], uint32(maxDiskImage+1))
+		if err := os.WriteFile(path, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+		db := NewDB()
+		if err := db.OpenAOF(path, FsyncNever); !errors.Is(err, ErrCorruptData) {
+			t.Fatalf("oversized-record error = %v", err)
+		}
+	})
+}
+
+func writeTestAOFRecord(t *testing.T, path string, offset uint64, image []byte, checksum uint32) {
+	t.Helper()
+	data := make([]byte, 8+16+len(image))
+	copy(data, aofMagic)
+	binary.BigEndian.PutUint64(data[8:16], offset)
+	binary.BigEndian.PutUint32(data[16:20], uint32(len(image)))
+	binary.BigEndian.PutUint32(data[20:24], checksum)
+	copy(data[24:], image)
+	if err := os.WriteFile(path, data, 0600); err != nil {
 		t.Fatal(err)
 	}
 }

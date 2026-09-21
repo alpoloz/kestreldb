@@ -245,7 +245,7 @@ func ReadResponse(r *bufio.Reader) (Response, error) {
 	case '_':
 		return Response{Type: RNil}, nil
 
-	case '*':
+	case '*', '~':
 		n, err := strconv.Atoi(rest)
 		if err != nil || n < -1 {
 			return Response{}, fmt.Errorf("invalid array length: %s", rest)

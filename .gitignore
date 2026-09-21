@@ -19,6 +19,9 @@
 # Dependency caches
 /pkg/
 
+# Local Codex permission rules
+/.codex/rules/
+
 # Editor/OS
 .DS_Store
 .idea/

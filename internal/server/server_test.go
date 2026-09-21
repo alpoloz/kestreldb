@@ -130,11 +130,15 @@ func TestPrimaryReplicaSynchronizationAndReconnect(t *testing.T) {
 	waitForValue("first", "one")
 	primaryDB.Set("second", []byte("two"))
 	waitForValue("second", "two")
-	for replica.ReplicaOffset() < 1 && time.Now().Before(deadline) { time.Sleep(10*time.Millisecond) }
+	for replica.ReplicaOffset() < 1 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
 	if replica.ReplicaOffset() < 1 {
 		t.Fatalf("replica offset = %d", replica.ReplicaOffset())
 	}
-	for primary.ReplicaStatus()["test-replica"].Offset < 1 && time.Now().Before(deadline) { time.Sleep(10*time.Millisecond) }
+	for primary.ReplicaStatus()["test-replica"].Offset < 1 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
 	if status := primary.ReplicaStatus()["test-replica"]; !status.Connected || status.Offset < 1 {
 		t.Fatalf("primary replica status = %#v", status)
 	}

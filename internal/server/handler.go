@@ -91,10 +91,21 @@ func (h *handler) dispatchContext(
 	w *proto.Writer,
 	tokens []string,
 ) (quit bool, err error) {
+	if len(tokens) == 0 {
+		return false, proto.ErrEmptyCommand
+	}
 	cmd := strings.ToUpper(tokens[0])
 	args := tokens[1:]
+	if err := validateCommandMetadata(cmd, args); err != nil {
+		return false, err
+	}
+	if h.server != nil {
+		if err := h.server.routeCommand(cmd, args); err != nil {
+			return false, err
+		}
+	}
 	if h.server != nil && h.server.isReplica() {
-		if meta, ok := commands[cmd]; ok && !meta.readOnly {
+		if meta, ok := commands[cmd]; ok && !meta.has(commandReadOnly) {
 			return false, errReadOnly
 		}
 	}
@@ -130,14 +141,8 @@ func (h *handler) dispatchContext(
 		}
 		return false, nil
 	case "ECHO":
-		if err := exact(cmd, args, 1); err != nil {
-			return false, err
-		}
 		return false, w.WriteBlobString([]byte(args[0]))
 	case "SELECT":
-		if err := exact(cmd, args, 1); err != nil {
-			return false, err
-		}
 		if args[0] != "0" {
 			return false, errors.New("only database 0 is supported")
 		}
@@ -147,43 +152,30 @@ func (h *handler) dispatchContext(
 			return false, w.WriteSimpleString("OK")
 		}
 		return false, errors.New("unsupported CLIENT subcommand")
-	case "PING":
-		if err := exact(cmd, args, 0); err != nil {
-			return false, err
+	case "CLUSTER":
+		if h.server == nil {
+			return false, errors.New("cluster mode is disabled")
 		}
+		return false, h.server.writeClusterCommand(w, args)
+	case "PING":
 		return false, w.WriteSimpleString("PONG")
 
 	case "QUIT":
-		if err := exact(cmd, args, 0); err != nil {
-			return false, err
-		}
 		_ = w.WriteSimpleString("BYE")
 		return true, nil
 
 	// ── Generic key commands ─────────────────────────────────────────────────
 
 	case "TYPE":
-		if err := exact(cmd, args, 1); err != nil {
-			return false, err
-		}
 		return false, w.WriteSimpleString(h.db.Type(args[0]).String())
 
 	case "DEL":
-		if err := atLeast(cmd, args, 1); err != nil {
-			return false, err
-		}
 		return false, w.WriteInt(h.db.Del(args...))
 
 	case "EXISTS":
-		if err := atLeast(cmd, args, 1); err != nil {
-			return false, err
-		}
 		return false, w.WriteInt(h.db.Exists(args...))
 
 	case "RENAME", "RENAMENX":
-		if err := exact(cmd, args, 2); err != nil {
-			return false, err
-		}
 		renamed, err := h.db.Rename(args[0], args[1], cmd == "RENAMENX")
 		if err != nil {
 			return false, err
@@ -194,9 +186,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteSimpleString("OK")
 
 	case "COPY":
-		if len(args) < 2 {
-			return false, fmt.Errorf("%s requires at least 2 arg(s), got %d", cmd, len(args))
-		}
 		replace, err := parseCopyOptions(args[2:])
 		if err != nil {
 			return false, err
@@ -208,15 +197,9 @@ func (h *handler) dispatchContext(
 		return false, w.WriteInt(boolInt(copied))
 
 	case "TOUCH":
-		if err := atLeast(cmd, args, 1); err != nil {
-			return false, err
-		}
 		return false, w.WriteInt(h.db.Touch(args...))
 
 	case "DBSIZE":
-		if err := exact(cmd, args, 0); err != nil {
-			return false, err
-		}
 		return false, w.WriteInt(h.db.DBSize())
 
 	case "FLUSHDB":
@@ -230,15 +213,9 @@ func (h *handler) dispatchContext(
 		return false, w.WriteSimpleString("OK")
 
 	case "KEYS":
-		if err := exact(cmd, args, 1); err != nil {
-			return false, err
-		}
 		return false, writeBlobArray(w, h.db.Keys(args[0]))
 
 	case "SCAN":
-		if err := atLeast(cmd, args, 1); err != nil {
-			return false, err
-		}
 		cursor, err := strconv.ParseUint(args[0], 10, 64)
 		if err != nil {
 			return false, engine.ErrInvalidInteger
@@ -257,9 +234,6 @@ func (h *handler) dispatchContext(
 		return false, writeBlobArray(w, keys)
 
 	case "EXPIRE", "PEXPIRE", "EXPIREAT", "PEXPIREAT":
-		if len(args) < 2 || len(args) > 3 {
-			return false, fmt.Errorf("%s requires 2 or 3 args, got %d", cmd, len(args))
-		}
 		value, err := strconv.ParseInt(args[1], 10, 64)
 		if err != nil {
 			return false, engine.ErrInvalidInteger
@@ -282,21 +256,12 @@ func (h *handler) dispatchContext(
 		return false, w.WriteInt(0)
 
 	case "TTL", "PTTL":
-		if err := exact(cmd, args, 1); err != nil {
-			return false, err
-		}
 		return false, w.WriteInt64(h.db.TTL(args[0], cmd == "PTTL"))
 
 	case "EXPIRETIME", "PEXPIRETIME":
-		if err := exact(cmd, args, 1); err != nil {
-			return false, err
-		}
 		return false, w.WriteInt64(h.db.ExpireTime(args[0], cmd == "PEXPIRETIME"))
 
 	case "PERSIST":
-		if err := exact(cmd, args, 1); err != nil {
-			return false, err
-		}
 		if h.db.Persist(args[0]) {
 			return false, w.WriteInt(1)
 		}
@@ -305,9 +270,6 @@ func (h *handler) dispatchContext(
 	// ── String ────────────────────────────────────────────────────────────────
 
 	case "SET":
-		if err := atLeast(cmd, args, 2); err != nil {
-			return false, err
-		}
 		options, err := parseSetOptions(args[2:], h.db.NowUnixMilli())
 		if err != nil {
 			return false, err
@@ -328,18 +290,12 @@ func (h *handler) dispatchContext(
 		return false, w.WriteSimpleString("OK")
 
 	case "SETNX":
-		if err := exact(cmd, args, 2); err != nil {
-			return false, err
-		}
 		if h.db.SetNX(args[0], []byte(args[1])) {
 			return false, w.WriteInt(1)
 		}
 		return false, w.WriteInt(0)
 
 	case "GETSET":
-		if err := exact(cmd, args, 2); err != nil {
-			return false, err
-		}
 		value, found, err := h.db.GetSet(args[0], []byte(args[1]))
 		if err != nil {
 			return false, err
@@ -350,9 +306,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteBlobString(value)
 
 	case "GETDEL":
-		if err := exact(cmd, args, 1); err != nil {
-			return false, err
-		}
 		value, found, err := h.db.GetDel(args[0])
 		if err != nil {
 			return false, err
@@ -363,9 +316,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteBlobString(value)
 
 	case "GET":
-		if err := exact(cmd, args, 1); err != nil {
-			return false, err
-		}
 		value, found, err := h.db.Get(args[0])
 		if err != nil {
 			return false, err
@@ -376,9 +326,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteBlobString(value)
 
 	case "MSET":
-		if len(args) < 2 || len(args)%2 != 0 {
-			return false, fmt.Errorf("%s requires one or more key-value pairs", cmd)
-		}
 		pairs := make([]engine.StringPair, 0, len(args)/2)
 		for i := 0; i < len(args); i += 2 {
 			pairs = append(pairs, engine.StringPair{Key: args[i], Value: []byte(args[i+1])})
@@ -387,9 +334,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteSimpleString("OK")
 
 	case "MSETNX":
-		if len(args) < 2 || len(args)%2 != 0 {
-			return false, fmt.Errorf("%s requires one or more key-value pairs", cmd)
-		}
 		pairs := make([]engine.StringPair, 0, len(args)/2)
 		for i := 0; i < len(args); i += 2 {
 			pairs = append(pairs, engine.StringPair{Key: args[i], Value: []byte(args[i+1])})
@@ -400,9 +344,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteInt(0)
 
 	case "MGET":
-		if err := atLeast(cmd, args, 1); err != nil {
-			return false, err
-		}
 		results := h.db.MGet(args...)
 		if err := w.WriteArrayHeader(len(results)); err != nil {
 			return false, err
@@ -421,9 +362,6 @@ func (h *handler) dispatchContext(
 		return false, nil
 
 	case "APPEND":
-		if err := exact(cmd, args, 2); err != nil {
-			return false, err
-		}
 		n, err := h.db.Append(args[0], []byte(args[1]))
 		if err != nil {
 			return false, err
@@ -431,9 +369,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteInt(n)
 
 	case "STRLEN":
-		if err := exact(cmd, args, 1); err != nil {
-			return false, err
-		}
 		n, err := h.db.StrLen(args[0])
 		if err != nil {
 			return false, err
@@ -441,9 +376,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteInt(n)
 
 	case "GETRANGE":
-		if err := exact(cmd, args, 3); err != nil {
-			return false, err
-		}
 		start, err := strconv.ParseInt(args[1], 10, 64)
 		if err != nil {
 			return false, engine.ErrInvalidInteger
@@ -459,9 +391,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteBlobString(value)
 
 	case "SETRANGE":
-		if err := exact(cmd, args, 3); err != nil {
-			return false, err
-		}
 		offset, err := strconv.ParseInt(args[1], 10, 64)
 		if err != nil {
 			return false, engine.ErrInvalidInteger
@@ -473,9 +402,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteInt(length)
 
 	case "INCR", "DECR":
-		if err := exact(cmd, args, 1); err != nil {
-			return false, err
-		}
 		var result int64
 		var err error
 		if cmd == "INCR" {
@@ -489,9 +415,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteInt64(result)
 
 	case "INCRBY", "DECRBY":
-		if err := exact(cmd, args, 2); err != nil {
-			return false, err
-		}
 		operand, err := strconv.ParseInt(args[1], 10, 64)
 		if err != nil {
 			return false, engine.ErrInvalidInteger
@@ -508,9 +431,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteInt64(result)
 
 	case "INCRBYFLOAT":
-		if err := exact(cmd, args, 2); err != nil {
-			return false, err
-		}
 		increment, err := strconv.ParseFloat(args[1], 64)
 		if err != nil {
 			return false, engine.ErrInvalidFloat
@@ -524,9 +444,6 @@ func (h *handler) dispatchContext(
 	// ── List ──────────────────────────────────────────────────────────────────
 
 	case "LPUSH", "RPUSH":
-		if err := atLeast(cmd, args, 2); err != nil {
-			return false, err
-		}
 		var length int
 		var err error
 		if cmd == "LPUSH" {
@@ -540,9 +457,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteInt(length)
 
 	case "LPOP", "RPOP":
-		if err := oneOrTwo(cmd, args); err != nil {
-			return false, err
-		}
 		count := int64(1)
 		withCount := len(args) == 2
 		if withCount {
@@ -571,9 +485,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteBlobString([]byte(values[0]))
 
 	case "LLEN":
-		if err := exact(cmd, args, 1); err != nil {
-			return false, err
-		}
 		length, err := h.db.LLen(args[0])
 		if err != nil {
 			return false, err
@@ -581,9 +492,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteInt(length)
 
 	case "LRANGE":
-		if err := exact(cmd, args, 3); err != nil {
-			return false, err
-		}
 		start, err := strconv.ParseInt(args[1], 10, 64)
 		if err != nil {
 			return false, engine.ErrInvalidInteger
@@ -599,9 +507,6 @@ func (h *handler) dispatchContext(
 		return false, writeBlobArray(w, values)
 
 	case "LINDEX":
-		if err := exact(cmd, args, 2); err != nil {
-			return false, err
-		}
 		index, err := strconv.ParseInt(args[1], 10, 64)
 		if err != nil {
 			return false, engine.ErrInvalidInteger
@@ -616,9 +521,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteBlobString([]byte(value))
 
 	case "LSET":
-		if err := exact(cmd, args, 3); err != nil {
-			return false, err
-		}
 		index, err := strconv.ParseInt(args[1], 10, 64)
 		if err != nil {
 			return false, engine.ErrInvalidInteger
@@ -629,9 +531,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteSimpleString("OK")
 
 	case "LTRIM":
-		if err := exact(cmd, args, 3); err != nil {
-			return false, err
-		}
 		start, err := strconv.ParseInt(args[1], 10, 64)
 		if err != nil {
 			return false, engine.ErrInvalidInteger
@@ -646,9 +545,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteSimpleString("OK")
 
 	case "LINSERT":
-		if err := exact(cmd, args, 4); err != nil {
-			return false, err
-		}
 		var before bool
 		switch strings.ToUpper(args[1]) {
 		case "BEFORE":
@@ -665,9 +561,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteInt(length)
 
 	case "LREM":
-		if err := exact(cmd, args, 3); err != nil {
-			return false, err
-		}
 		count, err := strconv.ParseInt(args[1], 10, 64)
 		if err != nil {
 			return false, engine.ErrInvalidInteger
@@ -679,9 +572,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteInt(removed)
 
 	case "LMOVE":
-		if err := exact(cmd, args, 4); err != nil {
-			return false, err
-		}
 		from, err := parseListDirection(args[2])
 		if err != nil {
 			return false, err
@@ -700,9 +590,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteBlobString([]byte(value))
 
 	case "RPOPLPUSH":
-		if err := exact(cmd, args, 2); err != nil {
-			return false, err
-		}
 		value, found, err := h.db.RPopLPush(args[0], args[1])
 		if err != nil {
 			return false, err
@@ -713,9 +600,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteBlobString([]byte(value))
 
 	case "BLPOP", "BRPOP":
-		if err := atLeast(cmd, args, 2); err != nil {
-			return false, err
-		}
 		waitCtx, cancel, err := listWaitContext(ctx, args[len(args)-1])
 		if err != nil {
 			return false, err
@@ -727,13 +611,13 @@ func (h *handler) dispatchContext(
 		}
 		key, value, found, err := h.db.WaitForListPop(waitCtx, args[:len(args)-1], direction)
 		if errors.Is(err, context.DeadlineExceeded) {
-			return false, w.WriteNil()
+			return false, w.WriteNullArray()
 		}
 		if err != nil {
 			return false, err
 		}
 		if !found {
-			return false, w.WriteNil()
+			return false, w.WriteNullArray()
 		}
 		if err := w.WriteArrayHeader(2); err != nil {
 			return false, err
@@ -744,9 +628,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteBlobString([]byte(value))
 
 	case "BLMOVE":
-		if err := exact(cmd, args, 5); err != nil {
-			return false, err
-		}
 		from, err := parseListDirection(args[2])
 		if err != nil {
 			return false, err
@@ -773,9 +654,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteBlobString([]byte(value))
 
 	case "BRPOPLPUSH":
-		if err := exact(cmd, args, 3); err != nil {
-			return false, err
-		}
 		waitCtx, cancel, err := listWaitContext(ctx, args[2])
 		if err != nil {
 			return false, err
@@ -798,9 +676,6 @@ func (h *handler) dispatchContext(
 	// ── Hash ──────────────────────────────────────────────────────────────────
 
 	case "HSET":
-		if len(args) < 3 || len(args)%2 == 0 {
-			return false, fmt.Errorf("%s requires one or more field-value pairs", cmd)
-		}
 		pairs := make([]engine.HashPair, 0, (len(args)-1)/2)
 		for index := 1; index < len(args); index += 2 {
 			pairs = append(pairs, engine.HashPair{Field: args[index], Value: args[index+1]})
@@ -812,9 +687,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteInt(n)
 
 	case "HSETNX":
-		if err := exact(cmd, args, 3); err != nil {
-			return false, err
-		}
 		stored, err := h.db.HSetNX(args[0], args[1], args[2])
 		if err != nil {
 			return false, err
@@ -825,9 +697,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteInt(0)
 
 	case "HGET":
-		if err := exact(cmd, args, 2); err != nil {
-			return false, err
-		}
 		value, found, err := h.db.HGet(args[0], args[1])
 		if err != nil {
 			return false, err
@@ -838,9 +707,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteBlobString([]byte(value))
 
 	case "HMGET":
-		if err := atLeast(cmd, args, 2); err != nil {
-			return false, err
-		}
 		results, err := h.db.HMGet(args[0], args[1:]...)
 		if err != nil {
 			return false, err
@@ -862,9 +728,6 @@ func (h *handler) dispatchContext(
 		return false, nil
 
 	case "HDEL":
-		if err := atLeast(cmd, args, 2); err != nil {
-			return false, err
-		}
 		n, err := h.db.HDel(args[0], args[1:]...)
 		if err != nil {
 			return false, err
@@ -872,9 +735,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteInt(n)
 
 	case "HLEN":
-		if err := exact(cmd, args, 1); err != nil {
-			return false, err
-		}
 		n, err := h.db.HLen(args[0])
 		if err != nil {
 			return false, err
@@ -882,9 +742,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteInt(n)
 
 	case "HEXISTS":
-		if err := exact(cmd, args, 2); err != nil {
-			return false, err
-		}
 		found, err := h.db.HExists(args[0], args[1])
 		if err != nil {
 			return false, err
@@ -895,9 +752,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteInt(0)
 
 	case "HKEYS", "HVALS":
-		if err := exact(cmd, args, 1); err != nil {
-			return false, err
-		}
 		var values []string
 		var err error
 		if cmd == "HKEYS" {
@@ -911,9 +765,6 @@ func (h *handler) dispatchContext(
 		return false, writeBlobArray(w, values)
 
 	case "HSTRLEN":
-		if err := exact(cmd, args, 2); err != nil {
-			return false, err
-		}
 		length, err := h.db.HStrLen(args[0], args[1])
 		if err != nil {
 			return false, err
@@ -921,9 +772,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteInt(length)
 
 	case "HEXPIRE", "HPEXPIRE", "HEXPIREAT", "HPEXPIREAT":
-		if err := atLeast(cmd, args, 4); err != nil {
-			return false, err
-		}
 		value, err := strconv.ParseInt(args[1], 10, 64)
 		if err != nil {
 			return false, engine.ErrInvalidInteger
@@ -943,9 +791,6 @@ func (h *handler) dispatchContext(
 		return false, writeIntArray(w, results)
 
 	case "HTTL", "HPTTL", "HEXPIRETIME", "HPEXPIRETIME":
-		if err := atLeast(cmd, args, 3); err != nil {
-			return false, err
-		}
 		_, fields, err := parseHashExpirationFields(args[1:], false)
 		if err != nil {
 			return false, err
@@ -959,9 +804,6 @@ func (h *handler) dispatchContext(
 		return false, writeInt64Array(w, results)
 
 	case "HPERSIST":
-		if err := atLeast(cmd, args, 3); err != nil {
-			return false, err
-		}
 		_, fields, err := parseHashExpirationFields(args[1:], false)
 		if err != nil {
 			return false, err
@@ -973,9 +815,6 @@ func (h *handler) dispatchContext(
 		return false, writeIntArray(w, results)
 
 	case "HINCRBY":
-		if err := exact(cmd, args, 3); err != nil {
-			return false, err
-		}
 		increment, err := strconv.ParseInt(args[2], 10, 64)
 		if err != nil {
 			return false, engine.ErrInvalidInteger
@@ -987,9 +826,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteInt64(result)
 
 	case "HINCRBYFLOAT":
-		if err := exact(cmd, args, 3); err != nil {
-			return false, err
-		}
 		increment, err := strconv.ParseFloat(args[2], 64)
 		if err != nil {
 			return false, engine.ErrInvalidFloat
@@ -1001,14 +837,11 @@ func (h *handler) dispatchContext(
 		return false, w.WriteBlobString([]byte(result))
 
 	case "HGETALL":
-		if err := exact(cmd, args, 1); err != nil {
-			return false, err
-		}
 		pairs, err := h.db.HGetAll(args[0])
 		if err != nil {
 			return false, err
 		}
-		if err := w.WriteArrayHeader(len(pairs) * 2); err != nil {
+		if err := w.WriteMapHeader(len(pairs)); err != nil {
 			return false, err
 		}
 		for field, value := range pairs {
@@ -1022,9 +855,6 @@ func (h *handler) dispatchContext(
 		return false, nil
 
 	case "HSCAN":
-		if err := atLeast(cmd, args, 2); err != nil {
-			return false, err
-		}
 		cursor, err := strconv.ParseUint(args[1], 10, 64)
 		if err != nil {
 			return false, engine.ErrInvalidInteger
@@ -1059,9 +889,6 @@ func (h *handler) dispatchContext(
 	// ── Set ───────────────────────────────────────────────────────────────────
 
 	case "SADD":
-		if err := atLeast(cmd, args, 2); err != nil {
-			return false, err
-		}
 		n, err := h.db.SAdd(args[0], args[1:]...)
 		if err != nil {
 			return false, err
@@ -1069,9 +896,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteInt(n)
 
 	case "SADDEX":
-		if err := atLeast(cmd, args, 3); err != nil {
-			return false, err
-		}
 		seconds, err := strconv.ParseInt(args[1], 10, 64)
 		if err != nil || seconds <= 0 || seconds > int64(math.MaxInt64/time.Second) {
 			return false, engine.ErrInvalidInteger
@@ -1083,9 +907,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteInt(n)
 
 	case "SREM":
-		if err := atLeast(cmd, args, 2); err != nil {
-			return false, err
-		}
 		n, err := h.db.SRem(args[0], args[1:]...)
 		if err != nil {
 			return false, err
@@ -1093,9 +914,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteInt(n)
 
 	case "SISMEMBER":
-		if err := exact(cmd, args, 2); err != nil {
-			return false, err
-		}
 		found, err := h.db.SIsMember(args[0], args[1])
 		if err != nil {
 			return false, err
@@ -1106,9 +924,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteInt(0)
 
 	case "SMISMEMBER":
-		if err := atLeast(cmd, args, 2); err != nil {
-			return false, err
-		}
 		results, err := h.db.SMIsMember(args[0], args[1:]...)
 		if err != nil {
 			return false, err
@@ -1128,9 +943,6 @@ func (h *handler) dispatchContext(
 		return false, nil
 
 	case "SMOVE":
-		if err := exact(cmd, args, 3); err != nil {
-			return false, err
-		}
 		moved, err := h.db.SMove(args[0], args[1], args[2])
 		if err != nil {
 			return false, err
@@ -1138,9 +950,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteInt(moved)
 
 	case "SCARD":
-		if err := exact(cmd, args, 1); err != nil {
-			return false, err
-		}
 		n, err := h.db.SCard(args[0])
 		if err != nil {
 			return false, err
@@ -1148,19 +957,13 @@ func (h *handler) dispatchContext(
 		return false, w.WriteInt(n)
 
 	case "SMEMBERS":
-		if err := exact(cmd, args, 1); err != nil {
-			return false, err
-		}
 		members, err := h.db.SMembers(args[0])
 		if err != nil {
 			return false, err
 		}
-		return false, writeBlobArray(w, members)
+		return false, writeBlobSet(w, members)
 
 	case "SPOP":
-		if err := oneOrTwo(cmd, args); err != nil {
-			return false, err
-		}
 		count := int64(1)
 		withCount := len(args) == 2
 		if withCount {
@@ -1183,9 +986,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteBlobString([]byte(members[0]))
 
 	case "SRANDMEMBER":
-		if err := oneOrTwo(cmd, args); err != nil {
-			return false, err
-		}
 		count := int64(1)
 		withCount := len(args) == 2
 		if withCount {
@@ -1208,9 +1008,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteBlobString([]byte(members[0]))
 
 	case "SSCAN":
-		if err := atLeast(cmd, args, 2); err != nil {
-			return false, err
-		}
 		cursor, err := strconv.ParseUint(args[1], 10, 64)
 		if err != nil {
 			return false, engine.ErrInvalidInteger
@@ -1232,9 +1029,6 @@ func (h *handler) dispatchContext(
 		return false, writeBlobArray(w, members)
 
 	case "SUNION", "SINTER", "SDIFF":
-		if err := atLeast(cmd, args, 1); err != nil {
-			return false, err
-		}
 		var members []string
 		var err error
 		switch cmd {
@@ -1248,12 +1042,9 @@ func (h *handler) dispatchContext(
 		if err != nil {
 			return false, err
 		}
-		return false, writeBlobArray(w, members)
+		return false, writeBlobSet(w, members)
 
 	case "SUNIONSTORE", "SINTERSTORE", "SDIFFSTORE":
-		if err := atLeast(cmd, args, 2); err != nil {
-			return false, err
-		}
 		var count int
 		var err error
 		switch cmd {
@@ -1272,9 +1063,6 @@ func (h *handler) dispatchContext(
 	// ── Sorted set ────────────────────────────────────────────────────────────
 
 	case "ZADD":
-		if err := atLeast(cmd, args, 3); err != nil {
-			return false, err
-		}
 		options, items, err := parseZAddArguments(args[1:])
 		if err != nil {
 			return false, err
@@ -1292,9 +1080,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteInt(result.Count)
 
 	case "ZREM":
-		if err := atLeast(cmd, args, 2); err != nil {
-			return false, err
-		}
 		n, err := h.db.ZRem(args[0], args[1:]...)
 		if err != nil {
 			return false, err
@@ -1302,9 +1087,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteInt(n)
 
 	case "ZSCORE":
-		if err := exact(cmd, args, 2); err != nil {
-			return false, err
-		}
 		score, found, err := h.db.ZScore(args[0], args[1])
 		if err != nil {
 			return false, err
@@ -1315,9 +1097,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteFloat(score)
 
 	case "ZMSCORE":
-		if err := atLeast(cmd, args, 2); err != nil {
-			return false, err
-		}
 		items, found, err := h.db.ZMScore(args[0], args[1:]...)
 		if err != nil {
 			return false, err
@@ -1339,9 +1118,6 @@ func (h *handler) dispatchContext(
 		return false, nil
 
 	case "ZRANK", "ZREVRANK":
-		if err := exact(cmd, args, 2); err != nil {
-			return false, err
-		}
 		var rank int
 		var found bool
 		var err error
@@ -1360,9 +1136,6 @@ func (h *handler) dispatchContext(
 
 	case "ZCARD":
 		// ZCARD key
-		if err := exact(cmd, args, 1); err != nil {
-			return false, err
-		}
 		n, err := h.db.ZCard(args[0])
 		if err != nil {
 			return false, err
@@ -1370,9 +1143,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteInt(n)
 
 	case "ZCOUNT":
-		if err := exact(cmd, args, 3); err != nil {
-			return false, err
-		}
 		min, err := parseScoreBound(args[1])
 		if err != nil {
 			return false, err
@@ -1388,9 +1158,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteInt(count)
 
 	case "ZLEXCOUNT":
-		if err := exact(cmd, args, 3); err != nil {
-			return false, err
-		}
 		min, err := parseLexBound(args[1])
 		if err != nil {
 			return false, err
@@ -1406,9 +1173,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteInt(count)
 
 	case "ZRANGE":
-		if err := atLeast(cmd, args, 3); err != nil {
-			return false, err
-		}
 		items, withScores, err := executeZRange(h.db, args[0], args[1], args[2], args[3:])
 		if err != nil {
 			return false, err
@@ -1416,9 +1180,6 @@ func (h *handler) dispatchContext(
 		return false, writeZSetItems(w, items, withScores)
 
 	case "ZRANGESTORE":
-		if err := atLeast(cmd, args, 4); err != nil {
-			return false, err
-		}
 		query, withScores, err := parseZRangeQuery(args[2], args[3], args[4:])
 		if err != nil {
 			return false, err
@@ -1433,9 +1194,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteInt(count)
 
 	case "ZINCRBY":
-		if err := exact(cmd, args, 3); err != nil {
-			return false, err
-		}
 		increment, err := strconv.ParseFloat(args[1], 64)
 		if err != nil || math.IsNaN(increment) {
 			return false, engine.ErrInvalidFloat
@@ -1447,9 +1205,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteFloat(score)
 
 	case "ZREMRANGEBYRANK":
-		if err := exact(cmd, args, 3); err != nil {
-			return false, err
-		}
 		start, err := strconv.ParseInt(args[1], 10, 64)
 		if err != nil {
 			return false, engine.ErrInvalidInteger
@@ -1465,9 +1220,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteInt(removed)
 
 	case "ZREMRANGEBYSCORE":
-		if err := exact(cmd, args, 3); err != nil {
-			return false, err
-		}
 		min, err := parseScoreBound(args[1])
 		if err != nil {
 			return false, err
@@ -1483,9 +1235,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteInt(removed)
 
 	case "ZREMRANGEBYLEX":
-		if err := exact(cmd, args, 3); err != nil {
-			return false, err
-		}
 		min, err := parseLexBound(args[1])
 		if err != nil {
 			return false, err
@@ -1501,9 +1250,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteInt(removed)
 
 	case "ZPOPMIN", "ZPOPMAX":
-		if err := oneOrTwo(cmd, args); err != nil {
-			return false, err
-		}
 		count := int64(1)
 		if len(args) == 2 {
 			var err error
@@ -1519,9 +1265,6 @@ func (h *handler) dispatchContext(
 		return false, writeZSetItems(w, items, true)
 
 	case "ZMPOP":
-		if err := atLeast(cmd, args, 3); err != nil {
-			return false, err
-		}
 		numKeys, err := strconv.Atoi(args[0])
 		if err != nil || numKeys <= 0 || len(args) < numKeys+2 {
 			return false, engine.ErrInvalidInteger
@@ -1546,7 +1289,7 @@ func (h *handler) dispatchContext(
 			return false, err
 		}
 		if !found {
-			return false, w.WriteNil()
+			return false, w.WriteNullArray()
 		}
 		if err := w.WriteArrayHeader(2); err != nil {
 			return false, err
@@ -1571,9 +1314,6 @@ func (h *handler) dispatchContext(
 		return false, nil
 
 	case "ZRANDMEMBER":
-		if len(args) < 1 || len(args) > 3 {
-			return false, fmt.Errorf("%s requires 1 to 3 args, got %d", cmd, len(args))
-		}
 		count := int64(1)
 		withCount := len(args) >= 2
 		withScores := false
@@ -1611,9 +1351,6 @@ func (h *handler) dispatchContext(
 		return false, writeZSetItems(w, items, withScores)
 
 	case "ZSCAN":
-		if err := atLeast(cmd, args, 2); err != nil {
-			return false, err
-		}
 		cursor, err := strconv.ParseUint(args[1], 10, 64)
 		if err != nil {
 			return false, engine.ErrInvalidInteger
@@ -1635,9 +1372,6 @@ func (h *handler) dispatchContext(
 		return false, writeZSetItems(w, items, true)
 
 	case "ZUNION", "ZINTER":
-		if err := atLeast(cmd, args, 2); err != nil {
-			return false, err
-		}
 		sources, aggregate, withScores, err := parseZCombineArguments(args)
 		if err != nil {
 			return false, err
@@ -1665,9 +1399,6 @@ func (h *handler) dispatchContext(
 		return false, writeZSetItems(w, items, withScores)
 
 	case "ZUNIONSTORE", "ZINTERSTORE":
-		if err := atLeast(cmd, args, 3); err != nil {
-			return false, err
-		}
 		sources, aggregate, withScores, err := parseZCombineArguments(args[1:])
 		if err != nil {
 			return false, err
@@ -1687,9 +1418,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteInt(count)
 
 	case "ZDIFFSTORE":
-		if err := atLeast(cmd, args, 3); err != nil {
-			return false, err
-		}
 		keys, withScores, err := parseZDiffArguments(args[1:])
 		if err != nil {
 			return false, err
@@ -1704,9 +1432,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteInt(count)
 
 	case "ZINTERCARD":
-		if err := atLeast(cmd, args, 2); err != nil {
-			return false, err
-		}
 		numKeys, err := strconv.Atoi(args[0])
 		if err != nil || numKeys <= 0 || len(args) < numKeys+1 {
 			return false, engine.ErrInvalidInteger
@@ -1729,9 +1454,6 @@ func (h *handler) dispatchContext(
 		return false, w.WriteInt(count)
 
 	case "ZRANGEWITHSCORES":
-		if err := exact(cmd, args, 3); err != nil {
-			return false, err
-		}
 		start, stop, err := parseRange(args[1], args[2])
 		if err != nil {
 			return false, err
@@ -1770,27 +1492,6 @@ func readCommands(
 	}
 }
 
-func exact(cmd string, args []string, n int) error {
-	if len(args) != n {
-		return fmt.Errorf("%s requires %d arg(s), got %d", cmd, n, len(args))
-	}
-	return nil
-}
-
-func atLeast(cmd string, args []string, n int) error {
-	if len(args) < n {
-		return fmt.Errorf("%s requires at least %d arg(s), got %d", cmd, n, len(args))
-	}
-	return nil
-}
-
-func oneOrTwo(cmd string, args []string) error {
-	if len(args) < 1 || len(args) > 2 {
-		return fmt.Errorf("%s requires 1 or 2 arg(s), got %d", cmd, len(args))
-	}
-	return nil
-}
-
 func parseListDirection(value string) (engine.ListDirection, error) {
 	switch strings.ToUpper(value) {
 	case "LEFT":
@@ -1821,6 +1522,18 @@ func listWaitContext(parent context.Context, timeoutArg string) (context.Context
 
 func writeBlobArray(w *proto.Writer, values []string) error {
 	if err := w.WriteArrayHeader(len(values)); err != nil {
+		return err
+	}
+	for _, value := range values {
+		if err := w.WriteBlobString([]byte(value)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func writeBlobSet(w *proto.Writer, values []string) error {
+	if err := w.WriteSetHeader(len(values)); err != nil {
 		return err
 	}
 	for _, value := range values {
@@ -2287,6 +2000,10 @@ func parseZDiffArguments(args []string) ([]string, bool, error) {
 }
 
 func writeDispatchError(w *proto.Writer, err error) error {
+	var coded interface{ Code() string }
+	if errors.As(err, &coded) {
+		return w.WriteErrorCode(coded.Code(), err.Error())
+	}
 	if errors.Is(err, errReadOnly) {
 		return w.WriteErrorCode("READONLY", err.Error())
 	}

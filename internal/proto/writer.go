@@ -93,6 +93,16 @@ func (w *Writer) WriteNil() error {
 	return err
 }
 
+// WriteNullArray writes the RESP2 null-array shape used by blocking pop and
+// multi-pop commands. RESP3 has one protocol-level null value.
+func (w *Writer) WriteNullArray() error {
+	if w.mode == ModeRESP2 {
+		_, err := w.w.WriteString("*-1\r\n")
+		return err
+	}
+	return w.WriteNil()
+}
+
 func (w *Writer) WriteArrayHeader(n int) error {
 	_, err := fmt.Fprintf(w.w, "*%d%s", n, w.terminator())
 	return err
@@ -103,6 +113,14 @@ func (w *Writer) WriteMapHeader(n int) error {
 		return w.WriteArrayHeader(2 * n)
 	}
 	_, err := fmt.Fprintf(w.w, "%%%d\r\n", n)
+	return err
+}
+
+func (w *Writer) WriteSetHeader(n int) error {
+	if w.mode != ModeRESP3 {
+		return w.WriteArrayHeader(n)
+	}
+	_, err := fmt.Fprintf(w.w, "~%d\r\n", n)
 	return err
 }
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"log"
@@ -21,7 +22,11 @@ func main() {
 	appendFsync := flag.String("appendfsync", "everysec", "AOF fsync policy: always, everysec, or no")
 	replicaOf := flag.String("replicaof", "", "primary address for read-only replication")
 	replicaID := flag.String("replica-id", "", "stable replica identifier")
+	clusterConfig := flag.String("cluster-config", "", "JSON cluster topology file")
 	flag.Parse()
+	if *replicaOf != "" && *clusterConfig != "" {
+		log.Fatal("-replicaof and -cluster-config cannot be used together")
+	}
 
 	db := engine.NewDB()
 	if *snapshot != "" {
@@ -51,6 +56,19 @@ func main() {
 		}()
 	}
 	srv := server.New(*addr, db)
+	if *clusterConfig != "" {
+		data, err := os.ReadFile(*clusterConfig)
+		if err != nil {
+			log.Fatal(err)
+		}
+		var topology server.ClusterTopology
+		if err := json.Unmarshal(data, &topology); err != nil {
+			log.Fatal(err)
+		}
+		if err := srv.SetClusterTopology(topology); err != nil {
+			log.Fatal(err)
+		}
+	}
 	if *replicaOf != "" {
 		srv.SetReplicaOf(*replicaOf, *replicaID)
 	}

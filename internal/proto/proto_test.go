@@ -97,3 +97,50 @@ func TestInt64ResponseRoundTrip(t *testing.T) {
 		t.Fatalf("ReadResponse() = %#v, want %d", response, want)
 	}
 }
+
+func TestRESP2AndRESP3CollectionShapes(t *testing.T) {
+	var resp2 bytes.Buffer
+	w := NewWriter(bufio.NewWriter(&resp2))
+	w.SetMode(ModeRESP2)
+	if err := w.WriteNullArray(); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.WriteSetHeader(1); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.WriteBlobString([]byte("member")); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if got := resp2.String(); got != "*-1\r\n*1\r\n$6\r\nmember\r\n" {
+		t.Fatalf("RESP2 collection shapes = %q", got)
+	}
+
+	var resp3 bytes.Buffer
+	w = NewWriter(bufio.NewWriter(&resp3))
+	w.SetMode(ModeRESP3)
+	if err := w.WriteNullArray(); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.WriteSetHeader(1); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.WriteBlobString([]byte("member")); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if got := resp3.String(); got != "_\r\n~1\r\n$6\r\nmember\r\n" {
+		t.Fatalf("RESP3 collection shapes = %q", got)
+	}
+	reader := bufio.NewReader(&resp3)
+	if response, err := ReadResponse(reader); err != nil || response.Type != RNil {
+		t.Fatalf("RESP3 null = %#v, %v", response, err)
+	}
+	if response, err := ReadResponse(reader); err != nil || response.Type != RArray || len(response.Elements) != 1 || response.Elements[0].Str != "member" {
+		t.Fatalf("RESP3 set = %#v, %v", response, err)
+	}
+}
