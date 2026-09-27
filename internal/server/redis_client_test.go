@@ -105,6 +105,33 @@ func TestGoRedisClientCompatibility(t *testing.T) {
 				t.Fatalf("ZRANGE WITHSCORES = %#v, %v", scores, err)
 			}
 
+			streamID, err := client.XAdd(ctx, &redis.XAddArgs{Stream: "events", ID: "1-0", Values: map[string]any{"type": "created"}}).Result()
+			if err != nil || streamID != "1-0" {
+				t.Fatalf("XADD = %q, %v", streamID, err)
+			}
+			streamEntries, err := client.XRange(ctx, "events", "-", "+").Result()
+			if err != nil || len(streamEntries) != 1 || streamEntries[0].ID != "1-0" || streamEntries[0].Values["type"] != "created" {
+				t.Fatalf("XRANGE = %#v, %v", streamEntries, err)
+			}
+			if err := client.XGroupCreate(ctx, "events", "workers", "0-0").Err(); err != nil {
+				t.Fatal(err)
+			}
+			groupEntries, err := client.XReadGroup(ctx, &redis.XReadGroupArgs{Group: "workers", Consumer: "alice", Streams: []string{"events", ">"}, Count: 1}).Result()
+			if err != nil || len(groupEntries) != 1 || len(groupEntries[0].Messages) != 1 || groupEntries[0].Messages[0].ID != "1-0" {
+				t.Fatalf("XREADGROUP = %#v, %v", groupEntries, err)
+			}
+			pending, err := client.XPending(ctx, "events", "workers").Result()
+			if err != nil || pending.Count != 1 || pending.Consumers["alice"] != 1 {
+				t.Fatalf("XPENDING = %#v, %v", pending, err)
+			}
+			claimed, err := client.XClaim(ctx, &redis.XClaimArgs{Stream: "events", Group: "workers", Consumer: "bob", MinIdle: 0, Messages: []string{"1-0"}}).Result()
+			if err != nil || len(claimed) != 1 || claimed[0].ID != "1-0" {
+				t.Fatalf("XCLAIM = %#v, %v", claimed, err)
+			}
+			if acked, err := client.XAck(ctx, "events", "workers", "1-0").Result(); err != nil || acked != 1 {
+				t.Fatalf("XACK = %d, %v", acked, err)
+			}
+
 			if err := client.Set(ctx, "wrongtype", "value", 0).Err(); err != nil {
 				t.Fatal(err)
 			}

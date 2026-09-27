@@ -18,6 +18,7 @@ func (db *DB) Rename(source, destination string, nx bool) (bool, error) {
 		})
 		if renamed && source != destination {
 			db.serveShardedWaitersLocked(destination)
+			db.serveStreamWaitersLocked(destination)
 		}
 		return renamed, err
 	}
@@ -83,6 +84,7 @@ func (db *DB) Copy(source, destination string, replace bool) (bool, error) {
 		})
 		if copied {
 			db.serveShardedWaitersLocked(destination)
+			db.serveStreamWaitersLocked(destination)
 		}
 		return copied, err
 	}
@@ -143,6 +145,8 @@ func cloneEntry(source *entry) *entry {
 			copyValue.add(item.Score, item.Member)
 		}
 		cloned.value = copyValue
+	case KindStream:
+		cloned.value = source.value.(*streamValue).clone()
 	}
 	return cloned
 }

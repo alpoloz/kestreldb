@@ -130,6 +130,8 @@ func TestCommandMetadataArityFlagsAndKeys(t *testing.T) {
 		ZRANGESTORE ZINCRBY ZREMRANGEBYRANK ZREMRANGEBYSCORE ZREMRANGEBYLEX
 		ZPOPMIN ZPOPMAX ZMPOP ZRANDMEMBER ZSCAN ZUNION ZINTER ZDIFF ZUNIONSTORE
 		ZINTERSTORE ZDIFFSTORE ZINTERCARD ZRANGEWITHSCORES
+		XADD XLEN XRANGE XREVRANGE XDEL XTRIM XREAD XGROUP XREADGROUP XACK
+		XPENDING XCLAIM XAUTOCLAIM
 	`)
 	for _, name := range implemented {
 		if _, ok := commands[name]; !ok {
@@ -154,6 +156,14 @@ func TestCommandMetadataArityFlagsAndKeys(t *testing.T) {
 	keys := commandKeys("MSET", []string{"first", "1", "second", "2"})
 	if len(keys) != 2 || keys[0] != "first" || keys[1] != "second" {
 		t.Fatalf("MSET keys = %v", keys)
+	}
+	keys = commandKeys("XREAD", []string{"COUNT", "2", "STREAMS", "first", "second", "0", "$"})
+	if len(keys) != 2 || keys[0] != "first" || keys[1] != "second" {
+		t.Fatalf("XREAD keys = %v", keys)
+	}
+	keys = commandKeys("XGROUP", []string{"CREATE", "events", "workers", "0-0"})
+	if len(keys) != 1 || keys[0] != "events" {
+		t.Fatalf("XGROUP keys = %v", keys)
 	}
 }
 

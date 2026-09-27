@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,6 +28,44 @@ func TestGenericCommandsAndWrongTypeResponse(t *testing.T) {
 	assertIntResponse(t, runCommand(t, h, "DEL", "key"), 1)
 	assertStringResponse(t, runCommand(t, h, "TYPE", "key"), "none")
 	assertIntResponse(t, runCommand(t, h, "ZADD", "key", "1", "member"), 1)
+}
+
+func TestStreamCommandsAndConsumerTracking(t *testing.T) {
+	h := &handler{db: engine.NewDB()}
+
+	assertBlobResponse(t, runCommand(t, h, "XADD", "events", "1-0", "type", "created", "actor", "alice"), "1-0")
+	assertBlobResponse(t, runCommand(t, h, "XADD", "events", "1-*", "type", "updated"), "1-1")
+	assertIntResponse(t, runCommand(t, h, "XLEN", "events"), 2)
+	rangeReply := runCommand(t, h, "XRANGE", "events", "-", "+")
+	if rangeReply.Type != proto.RArray || len(rangeReply.Elements) != 2 || rangeReply.Elements[0].Elements[0].Str != "1-0" {
+		t.Fatalf("XRANGE response = %#v", rangeReply)
+	}
+	readReply := runCommand(t, h, "XREAD", "COUNT", "1", "STREAMS", "events", "0-0")
+	if readReply.Type != proto.RArray || len(readReply.Elements) != 1 || readReply.Elements[0].Elements[1].Elements[0].Elements[0].Str != "1-0" {
+		t.Fatalf("XREAD response = %#v", readReply)
+	}
+
+	assertStringResponse(t, runCommand(t, h, "XGROUP", "CREATE", "events", "workers", "0-0"), "OK")
+	groupReply := runCommand(t, h, "XREADGROUP", "GROUP", "workers", "alice", "COUNT", "1", "STREAMS", "events", ">")
+	if groupReply.Type != proto.RArray || len(groupReply.Elements) != 1 {
+		t.Fatalf("XREADGROUP response = %#v", groupReply)
+	}
+	pending := runCommand(t, h, "XPENDING", "events", "workers")
+	if pending.Type != proto.RArray || pending.Elements[0].Int != 1 || pending.Elements[3].Elements[0].Elements[0].Str != "alice" {
+		t.Fatalf("XPENDING response = %#v", pending)
+	}
+	assertIntResponse(t, runCommand(t, h, "XACK", "events", "workers", "1-0"), 1)
+	assertIntResponse(t, runCommand(t, h, "XDEL", "events", "1-0"), 1)
+	assertIntResponse(t, runCommand(t, h, "XTRIM", "events", "MAXLEN", "0"), 1)
+	assertIntResponse(t, runCommand(t, h, "XLEN", "events"), 0)
+	if response := runCommand(t, h, "XREAD", "BLOCK", "1", "STREAMS", "empty", "$"); response.Type != proto.RNil {
+		t.Fatalf("blocking XREAD timeout response = %#v", response)
+	}
+
+	duplicate := runCommand(t, h, "XGROUP", "CREATE", "events", "workers", "0-0")
+	if duplicate.Type != proto.RError || !strings.HasPrefix(duplicate.Str, "BUSYGROUP ") {
+		t.Fatalf("duplicate group response = %#v", duplicate)
+	}
 }
 
 func TestExtendedGenericKeyCommands(t *testing.T) {

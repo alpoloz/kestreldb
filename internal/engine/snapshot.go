@@ -26,6 +26,49 @@ type snapshotEntry struct {
 	List     [][]byte         `json:"list,omitempty"`
 	Set      []snapshotMember `json:"set,omitempty"`
 	ZSet     []snapshotScore  `json:"zset,omitempty"`
+	Stream   *snapshotStream  `json:"stream,omitempty"`
+}
+
+type snapshotStream struct {
+	LastGenerated snapshotStreamID      `json:"last_generated"`
+	Entries       []snapshotStreamEntry `json:"entries,omitempty"`
+	Groups        []snapshotStreamGroup `json:"groups,omitempty"`
+}
+
+type snapshotStreamID struct {
+	Milliseconds uint64 `json:"milliseconds"`
+	Sequence     uint64 `json:"sequence"`
+}
+
+type snapshotStreamEntry struct {
+	ID     snapshotStreamID      `json:"id"`
+	Fields []snapshotStreamField `json:"fields"`
+}
+
+type snapshotStreamField struct {
+	Name  []byte `json:"name"`
+	Value []byte `json:"value"`
+}
+
+type snapshotStreamGroup struct {
+	Name          []byte                   `json:"name"`
+	LastDelivered snapshotStreamID         `json:"last_delivered"`
+	EntriesRead   uint64                   `json:"entries_read"`
+	Consumers     []snapshotStreamConsumer `json:"consumers,omitempty"`
+	Pending       []snapshotStreamPending  `json:"pending,omitempty"`
+}
+
+type snapshotStreamConsumer struct {
+	Name     []byte `json:"name"`
+	SeenAt   int64  `json:"seen_at"`
+	ActiveAt int64  `json:"active_at"`
+}
+
+type snapshotStreamPending struct {
+	ID          snapshotStreamID `json:"id"`
+	Consumer    []byte           `json:"consumer"`
+	DeliveredAt int64            `json:"delivered_at"`
+	Deliveries  uint64           `json:"deliveries"`
 }
 
 type snapshotScore struct {
@@ -125,12 +168,120 @@ func (db *DB) snapshotLocked() ([]byte, error) {
 			for _, member := range e.value.(*zset).items() {
 				item.ZSet = append(item.ZSet, snapshotScore{Member: []byte(member.Member), Score: strconv.FormatFloat(member.Score, 'g', -1, 64)})
 			}
+		case KindStream:
+			item.Stream = snapshotStreamValue(e.value.(*streamValue))
 		default:
 			return nil, fmt.Errorf("snapshot: unsupported kind %d", e.kind)
 		}
 		image.Entries = append(image.Entries, item)
 	}
 	return json.Marshal(image)
+}
+
+func snapshotStreamValue(stream *streamValue) *snapshotStream {
+	result := &snapshotStream{LastGenerated: snapshotID(stream.lastGenerated)}
+	for _, entry := range stream.entries {
+		item := snapshotStreamEntry{ID: snapshotID(entry.ID)}
+		for _, field := range entry.Fields {
+			item.Fields = append(item.Fields, snapshotStreamField{Name: []byte(field.Name), Value: []byte(field.Value)})
+		}
+		result.Entries = append(result.Entries, item)
+	}
+	groupNames := make([]string, 0, len(stream.groups))
+	for name := range stream.groups {
+		groupNames = append(groupNames, name)
+	}
+	sort.Strings(groupNames)
+	for _, name := range groupNames {
+		group := stream.groups[name]
+		item := snapshotStreamGroup{Name: []byte(name), LastDelivered: snapshotID(group.lastDelivered), EntriesRead: group.entriesRead}
+		consumerNames := make([]string, 0, len(group.consumers))
+		for consumer := range group.consumers {
+			consumerNames = append(consumerNames, consumer)
+		}
+		sort.Strings(consumerNames)
+		for _, consumerName := range consumerNames {
+			consumer := group.consumers[consumerName]
+			item.Consumers = append(item.Consumers, snapshotStreamConsumer{Name: []byte(consumerName), SeenAt: consumer.seenAt, ActiveAt: consumer.activeAt})
+		}
+		for _, id := range sortedPendingMapIDs(group.pending) {
+			pending := group.pending[id]
+			item.Pending = append(item.Pending, snapshotStreamPending{ID: snapshotID(id), Consumer: []byte(pending.consumer), DeliveredAt: pending.deliveredAt, Deliveries: pending.deliveries})
+		}
+		result.Groups = append(result.Groups, item)
+	}
+	return result
+}
+
+func snapshotID(id StreamID) snapshotStreamID {
+	return snapshotStreamID{Milliseconds: id.Milliseconds, Sequence: id.Sequence}
+}
+
+func restoreSnapshotID(id snapshotStreamID) StreamID {
+	return StreamID{Milliseconds: id.Milliseconds, Sequence: id.Sequence}
+}
+
+func loadSnapshotStream(item *snapshotStream) (*streamValue, error) {
+	if item == nil {
+		return nil, errors.New("missing stream value")
+	}
+	stream := newStreamValue()
+	stream.lastGenerated = restoreSnapshotID(item.LastGenerated)
+	var previous StreamID
+	for index, encoded := range item.Entries {
+		id := restoreSnapshotID(encoded.ID)
+		if id == (StreamID{}) || index > 0 && id.Compare(previous) <= 0 {
+			return nil, errors.New("invalid stream entry order")
+		}
+		fields := make([]StreamField, 0, len(encoded.Fields))
+		for _, field := range encoded.Fields {
+			fields = append(fields, StreamField{Name: string(field.Name), Value: string(field.Value)})
+		}
+		if len(fields) == 0 {
+			return nil, errors.New("stream entry has no fields")
+		}
+		stream.entries = append(stream.entries, StreamEntry{ID: id, Fields: fields})
+		previous = id
+	}
+	if len(stream.entries) > 0 && stream.lastGenerated.Compare(previous) < 0 {
+		return nil, errors.New("stream last ID precedes an entry")
+	}
+	for _, encodedGroup := range item.Groups {
+		name := string(encodedGroup.Name)
+		if name == "" {
+			return nil, errors.New("empty stream group name")
+		}
+		if _, duplicate := stream.groups[name]; duplicate {
+			return nil, errors.New("duplicate stream group")
+		}
+		group := newStreamConsumerGroup(restoreSnapshotID(encodedGroup.LastDelivered))
+		group.entriesRead = encodedGroup.EntriesRead
+		for _, encodedConsumer := range encodedGroup.Consumers {
+			consumerName := string(encodedConsumer.Name)
+			if consumerName == "" {
+				return nil, errors.New("empty stream consumer name")
+			}
+			if _, duplicate := group.consumers[consumerName]; duplicate {
+				return nil, errors.New("duplicate stream consumer")
+			}
+			group.consumers[consumerName] = &streamConsumer{seenAt: encodedConsumer.SeenAt, activeAt: encodedConsumer.ActiveAt, pending: make(map[StreamID]struct{})}
+		}
+		for _, encodedPending := range encodedGroup.Pending {
+			id := restoreSnapshotID(encodedPending.ID)
+			consumerName := string(encodedPending.Consumer)
+			consumer := group.consumers[consumerName]
+			if id == (StreamID{}) || consumer == nil || encodedPending.Deliveries == 0 {
+				return nil, errors.New("invalid stream pending entry")
+			}
+			if _, duplicate := group.pending[id]; duplicate {
+				return nil, errors.New("duplicate stream pending entry")
+			}
+			group.pending[id] = &streamPendingEntry{consumer: consumerName, deliveredAt: encodedPending.DeliveredAt, deliveries: encodedPending.Deliveries}
+			consumer.pending[id] = struct{}{}
+		}
+		stream.groups[name] = group
+	}
+	return stream, nil
 }
 
 func (db *DB) purgeAllShards() {
@@ -241,6 +392,12 @@ func (db *DB) LoadSnapshot(data []byte) error {
 				z.add(score, name)
 			}
 			e.value = z
+		case KindStream:
+			stream, err := loadSnapshotStream(item.Stream)
+			if err != nil {
+				return err
+			}
+			e.value = stream
 		default:
 			return fmt.Errorf("unsupported snapshot kind %d", item.Kind)
 		}

@@ -268,6 +268,15 @@ func (db *DB) CloseWaiters() {
 		for waiter := range unique {
 			db.completeListWaiterLocked(waiter, listWaitResult{err: context.Canceled})
 		}
+		streamUnique := make(map[*streamWaiter]struct{})
+		for _, queue := range db.streamWaiters {
+			for _, waiter := range queue {
+				streamUnique[waiter] = struct{}{}
+			}
+		}
+		for waiter := range streamUnique {
+			db.completeStreamWaiterLocked(waiter, streamWaitResult{err: context.Canceled})
+		}
 		return
 	}
 	db.mu.Lock()
@@ -283,5 +292,14 @@ func (db *DB) CloseWaiters() {
 	}
 	for waiter := range unique {
 		db.completeListWaiterLocked(waiter, listWaitResult{err: context.Canceled})
+	}
+	streamUnique := make(map[*streamWaiter]struct{})
+	for _, queue := range db.streamWaiters {
+		for _, waiter := range queue {
+			streamUnique[waiter] = struct{}{}
+		}
+	}
+	for waiter := range streamUnique {
+		db.completeStreamWaiterLocked(waiter, streamWaitResult{err: context.Canceled})
 	}
 }

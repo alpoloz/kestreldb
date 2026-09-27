@@ -22,6 +22,10 @@
 # Local Codex permission rules
 /.codex/rules/
 
+# Local development plans
+/PLAN.md
+/path.md
+
 # Editor/OS
 .DS_Store
 .idea/

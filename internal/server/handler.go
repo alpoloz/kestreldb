@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -1464,6 +1465,189 @@ func (h *handler) dispatchContext(
 		}
 		return false, writeZSetItems(w, items, true)
 
+	// ── Stream commands ───────────────────────────────────────────────
+
+	case "XADD":
+		request, fields, options, err := parseXAddArguments(args[1:])
+		if err != nil {
+			return false, err
+		}
+		id, added, err := h.db.XAdd(args[0], request, fields, options)
+		if err != nil {
+			return false, err
+		}
+		if !added {
+			return false, w.WriteNil()
+		}
+		return false, w.WriteBlobString([]byte(id.String()))
+
+	case "XLEN":
+		length, err := h.db.XLen(args[0])
+		if err != nil {
+			return false, err
+		}
+		return false, w.WriteInt(length)
+
+	case "XRANGE", "XREVRANGE":
+		reverse := cmd == "XREVRANGE"
+		first, second := args[1], args[2]
+		if reverse {
+			first, second = second, first
+		}
+		start, err := parseStreamRangeBound(first, false)
+		if err != nil {
+			return false, err
+		}
+		end, err := parseStreamRangeBound(second, true)
+		if err != nil {
+			return false, err
+		}
+		count := int64(0)
+		if len(args) > 3 {
+			if len(args) != 5 || !strings.EqualFold(args[3], "COUNT") {
+				return false, errors.New("syntax error")
+			}
+			count, err = strconv.ParseInt(args[4], 10, 64)
+			if err != nil || count <= 0 {
+				return false, engine.ErrInvalidInteger
+			}
+		}
+		entries, err := h.db.XRange(args[0], start, end, count, reverse)
+		if err != nil {
+			return false, err
+		}
+		return false, writeStreamEntries(w, entries)
+
+	case "XDEL":
+		ids, err := parseStreamIDs(args[1:])
+		if err != nil {
+			return false, err
+		}
+		removed, err := h.db.XDel(args[0], ids...)
+		if err != nil {
+			return false, err
+		}
+		return false, w.WriteInt(removed)
+
+	case "XTRIM":
+		trim, consumed, err := parseStreamTrim(args[1:])
+		if err != nil || consumed != len(args)-1 {
+			if err != nil {
+				return false, err
+			}
+			return false, errors.New("syntax error")
+		}
+		removed, err := h.db.XTrim(args[0], trim)
+		if err != nil {
+			return false, err
+		}
+		return false, w.WriteInt(removed)
+
+	case "XREAD":
+		requests, count, block, timeout, err := parseXReadArguments(args)
+		if err != nil {
+			return false, err
+		}
+		var results []engine.StreamReadResult
+		if block {
+			waitCtx, cancel, waitErr := streamWaitContext(ctx, timeout)
+			if waitErr != nil {
+				return false, waitErr
+			}
+			defer cancel()
+			results, err = h.db.WaitForStreamRead(waitCtx, requests, count)
+			if errors.Is(err, context.DeadlineExceeded) {
+				return false, w.WriteNullArray()
+			}
+		} else {
+			results, err = h.db.XRead(requests, count)
+		}
+		if err != nil {
+			return false, err
+		}
+		if len(results) == 0 {
+			return false, w.WriteNullArray()
+		}
+		return false, writeStreamReadResults(w, results)
+
+	case "XGROUP":
+		return false, h.writeXGroup(w, args)
+
+	case "XREADGROUP":
+		group, consumer, requests, options, block, timeout, err := parseXReadGroupArguments(args)
+		if err != nil {
+			return false, err
+		}
+		var results []engine.StreamReadResult
+		canBlock := block
+		for _, request := range requests {
+			canBlock = canBlock && request.NewOnly
+		}
+		if canBlock {
+			waitCtx, cancel, waitErr := streamWaitContext(ctx, timeout)
+			if waitErr != nil {
+				return false, waitErr
+			}
+			defer cancel()
+			results, err = h.db.WaitForStreamGroupRead(waitCtx, group, consumer, requests, options)
+			if errors.Is(err, context.DeadlineExceeded) {
+				return false, w.WriteNullArray()
+			}
+		} else {
+			results, err = h.db.XReadGroup(group, consumer, requests, options)
+		}
+		if err != nil {
+			return false, err
+		}
+		if len(results) == 0 {
+			return false, w.WriteNullArray()
+		}
+		return false, writeStreamReadResults(w, results)
+
+	case "XACK":
+		ids, err := parseStreamIDs(args[2:])
+		if err != nil {
+			return false, err
+		}
+		count, err := h.db.XAck(args[0], args[1], ids...)
+		if err != nil {
+			return false, err
+		}
+		return false, w.WriteInt(count)
+
+	case "XPENDING":
+		return false, h.writeXPending(w, args)
+
+	case "XCLAIM":
+		entries, ids, justID, err := h.executeXClaim(args)
+		if err != nil {
+			return false, err
+		}
+		if justID {
+			return false, writeStreamIDs(w, ids)
+		}
+		return false, writeStreamEntries(w, entries)
+
+	case "XAUTOCLAIM":
+		result, justID, err := h.executeXAutoClaim(args)
+		if err != nil {
+			return false, err
+		}
+		if err := w.WriteArrayHeader(3); err != nil {
+			return false, err
+		}
+		if err := w.WriteBlobString([]byte(result.Next.String())); err != nil {
+			return false, err
+		}
+		if justID {
+			if err := writeStreamIDs(w, result.IDs); err != nil {
+				return false, err
+			}
+		} else if err := writeStreamEntries(w, result.Entries); err != nil {
+			return false, err
+		}
+		return false, writeStreamIDs(w, result.Deleted)
+
 	default:
 		return false, fmt.Errorf("unknown command %q", cmd)
 	}
@@ -1490,6 +1674,633 @@ func readCommands(
 			return
 		}
 	}
+}
+
+func parseXAddArguments(args []string) (engine.StreamIDRequest, []engine.StreamField, engine.StreamAddOptions, error) {
+	options := engine.StreamAddOptions{}
+	index := 0
+	for index < len(args) {
+		switch strings.ToUpper(args[index]) {
+		case "NOMKSTREAM":
+			if options.NoMkStream {
+				return engine.StreamIDRequest{}, nil, options, errors.New("syntax error")
+			}
+			options.NoMkStream = true
+			index++
+		case "MAXLEN", "MINID":
+			if options.Trim != nil {
+				return engine.StreamIDRequest{}, nil, options, errors.New("syntax error")
+			}
+			trim, consumed, err := parseStreamTrim(args[index:])
+			if err != nil {
+				return engine.StreamIDRequest{}, nil, options, err
+			}
+			options.Trim = &trim
+			index += consumed
+		default:
+			goto parsedOptions
+		}
+	}
+
+parsedOptions:
+	if index >= len(args) {
+		return engine.StreamIDRequest{}, nil, options, errors.New("syntax error")
+	}
+	request, err := parseStreamIDRequest(args[index])
+	if err != nil {
+		return engine.StreamIDRequest{}, nil, options, err
+	}
+	index++
+	if index >= len(args) || (len(args)-index)%2 != 0 {
+		return engine.StreamIDRequest{}, nil, options, errors.New("wrong number of field-value arguments")
+	}
+	fields := make([]engine.StreamField, 0, (len(args)-index)/2)
+	for ; index < len(args); index += 2 {
+		fields = append(fields, engine.StreamField{Name: args[index], Value: args[index+1]})
+	}
+	return request, fields, options, nil
+}
+
+func parseStreamIDRequest(value string) (engine.StreamIDRequest, error) {
+	if value == "*" {
+		return engine.StreamIDRequest{Auto: true}, nil
+	}
+	parts := strings.Split(value, "-")
+	if len(parts) != 2 {
+		return engine.StreamIDRequest{}, engine.ErrInvalidStreamID
+	}
+	milliseconds, err := strconv.ParseUint(parts[0], 10, 64)
+	if err != nil {
+		return engine.StreamIDRequest{}, engine.ErrInvalidStreamID
+	}
+	if parts[1] == "*" {
+		return engine.StreamIDRequest{Milliseconds: milliseconds, AutoSequence: true}, nil
+	}
+	sequence, err := strconv.ParseUint(parts[1], 10, 64)
+	if err != nil {
+		return engine.StreamIDRequest{}, engine.ErrInvalidStreamID
+	}
+	return engine.StreamIDRequest{Milliseconds: milliseconds, Sequence: sequence}, nil
+}
+
+func parseStreamID(value string) (engine.StreamID, error) {
+	parts := strings.Split(value, "-")
+	if len(parts) == 1 {
+		milliseconds, err := strconv.ParseUint(parts[0], 10, 64)
+		if err != nil {
+			return engine.StreamID{}, engine.ErrInvalidStreamID
+		}
+		return engine.StreamID{Milliseconds: milliseconds}, nil
+	}
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return engine.StreamID{}, engine.ErrInvalidStreamID
+	}
+	milliseconds, err := strconv.ParseUint(parts[0], 10, 64)
+	if err != nil {
+		return engine.StreamID{}, engine.ErrInvalidStreamID
+	}
+	sequence, err := strconv.ParseUint(parts[1], 10, 64)
+	if err != nil {
+		return engine.StreamID{}, engine.ErrInvalidStreamID
+	}
+	return engine.StreamID{Milliseconds: milliseconds, Sequence: sequence}, nil
+}
+
+func parseStreamIDs(values []string) ([]engine.StreamID, error) {
+	ids := make([]engine.StreamID, 0, len(values))
+	for _, value := range values {
+		id, err := parseStreamID(value)
+		if err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
+}
+
+func parseStreamRangeBound(value string, end bool) (engine.StreamRangeBound, error) {
+	bound := engine.StreamRangeBound{}
+	if value == "-" {
+		bound.Unbounded = -1
+		return bound, nil
+	}
+	if value == "+" {
+		bound.Unbounded = 1
+		return bound, nil
+	}
+	if strings.HasPrefix(value, "(") {
+		bound.Exclusive = true
+		value = value[1:]
+	}
+	parts := strings.Split(value, "-")
+	if len(parts) == 1 {
+		milliseconds, err := strconv.ParseUint(parts[0], 10, 64)
+		if err != nil {
+			return engine.StreamRangeBound{}, engine.ErrInvalidStreamID
+		}
+		bound.ID.Milliseconds = milliseconds
+		if end {
+			bound.ID.Sequence = math.MaxUint64
+		}
+		return bound, nil
+	}
+	id, err := parseStreamID(value)
+	if err != nil {
+		return engine.StreamRangeBound{}, err
+	}
+	bound.ID = id
+	return bound, nil
+}
+
+func parseStreamTrim(args []string) (engine.StreamTrimOptions, int, error) {
+	if len(args) < 2 {
+		return engine.StreamTrimOptions{}, 0, errors.New("syntax error")
+	}
+	options := engine.StreamTrimOptions{}
+	switch strings.ToUpper(args[0]) {
+	case "MAXLEN":
+		options.Mode = engine.StreamTrimMaxLen
+	case "MINID":
+		options.Mode = engine.StreamTrimMinID
+	default:
+		return options, 0, errors.New("syntax error")
+	}
+	index := 1
+	if index < len(args) && (args[index] == "=" || args[index] == "~") {
+		options.Approximate = args[index] == "~"
+		index++
+	}
+	if index >= len(args) {
+		return options, 0, errors.New("syntax error")
+	}
+	if options.Mode == engine.StreamTrimMaxLen {
+		value, err := strconv.ParseInt(args[index], 10, 64)
+		if err != nil || value < 0 {
+			return options, 0, engine.ErrInvalidInteger
+		}
+		options.MaxLen = value
+	} else {
+		id, err := parseStreamID(args[index])
+		if err != nil {
+			return options, 0, err
+		}
+		options.MinID = id
+	}
+	index++
+	if index < len(args) && strings.EqualFold(args[index], "LIMIT") {
+		if !options.Approximate {
+			return options, 0, errors.New("syntax error")
+		}
+		if index+1 >= len(args) {
+			return options, 0, errors.New("syntax error")
+		}
+		limit, err := strconv.ParseInt(args[index+1], 10, 64)
+		if err != nil || limit < 0 {
+			return options, 0, engine.ErrInvalidInteger
+		}
+		options.Limit = limit
+		index += 2
+	}
+	return options, index, nil
+}
+
+func parseXReadArguments(args []string) ([]engine.StreamReadRequest, int64, bool, int64, error) {
+	count := int64(0)
+	block := false
+	timeout := int64(0)
+	index := 0
+	for index < len(args) && !strings.EqualFold(args[index], "STREAMS") {
+		if index+1 >= len(args) {
+			return nil, 0, false, 0, errors.New("syntax error")
+		}
+		switch strings.ToUpper(args[index]) {
+		case "COUNT":
+			value, err := strconv.ParseInt(args[index+1], 10, 64)
+			if err != nil || value <= 0 {
+				return nil, 0, false, 0, engine.ErrInvalidInteger
+			}
+			count = value
+		case "BLOCK":
+			value, err := strconv.ParseInt(args[index+1], 10, 64)
+			if err != nil || value < 0 {
+				return nil, 0, false, 0, engine.ErrInvalidInteger
+			}
+			block, timeout = true, value
+		default:
+			return nil, 0, false, 0, errors.New("syntax error")
+		}
+		index += 2
+	}
+	if index >= len(args) || !strings.EqualFold(args[index], "STREAMS") {
+		return nil, 0, false, 0, errors.New("syntax error")
+	}
+	requests, err := parseStreamReadRequests(args[index+1:], false)
+	return requests, count, block, timeout, err
+}
+
+func parseStreamReadRequests(args []string, group bool) ([]engine.StreamReadRequest, error) {
+	if len(args) < 2 || len(args)%2 != 0 {
+		return nil, errors.New("Unbalanced XREAD list of streams")
+	}
+	half := len(args) / 2
+	requests := make([]engine.StreamReadRequest, half)
+	for index := 0; index < half; index++ {
+		request := engine.StreamReadRequest{Key: args[index]}
+		selector := args[half+index]
+		if group && selector == ">" {
+			request.NewOnly = true
+		} else if !group && selector == "$" {
+			request.UseLatest = true
+		} else {
+			id, err := parseStreamID(selector)
+			if err != nil {
+				return nil, err
+			}
+			request.After = id
+		}
+		requests[index] = request
+	}
+	return requests, nil
+}
+
+func streamWaitContext(parent context.Context, milliseconds int64) (context.Context, context.CancelFunc, error) {
+	if milliseconds == 0 {
+		ctx, cancel := context.WithCancel(parent)
+		return ctx, cancel, nil
+	}
+	if milliseconds > math.MaxInt64/int64(time.Millisecond) {
+		return nil, nil, errors.New("timeout is out of range")
+	}
+	ctx, cancel := context.WithTimeout(parent, time.Duration(milliseconds)*time.Millisecond)
+	return ctx, cancel, nil
+}
+
+func (h *handler) writeXGroup(w *proto.Writer, args []string) error {
+	switch strings.ToUpper(args[0]) {
+	case "CREATE":
+		if len(args) != 4 && len(args) != 5 || len(args) == 5 && !strings.EqualFold(args[4], "MKSTREAM") {
+			return errors.New("syntax error")
+		}
+		start := engine.StreamID{}
+		useLast := args[3] == "$"
+		if !useLast {
+			var err error
+			start, err = parseStreamID(args[3])
+			if err != nil {
+				return err
+			}
+		}
+		if err := h.db.XGroupCreate(args[1], args[2], start, useLast, len(args) == 5); err != nil {
+			return err
+		}
+		return w.WriteSimpleString("OK")
+	case "DESTROY":
+		if len(args) != 3 {
+			return errors.New("syntax error")
+		}
+		removed, err := h.db.XGroupDestroy(args[1], args[2])
+		if err != nil {
+			return err
+		}
+		return w.WriteInt(boolInt(removed))
+	case "SETID":
+		if len(args) != 4 {
+			return errors.New("syntax error")
+		}
+		id := engine.StreamID{}
+		useLast := args[3] == "$"
+		if !useLast {
+			var err error
+			id, err = parseStreamID(args[3])
+			if err != nil {
+				return err
+			}
+		}
+		if err := h.db.XGroupSetID(args[1], args[2], id, useLast); err != nil {
+			return err
+		}
+		return w.WriteSimpleString("OK")
+	case "CREATECONSUMER":
+		if len(args) != 4 {
+			return errors.New("syntax error")
+		}
+		created, err := h.db.XGroupCreateConsumer(args[1], args[2], args[3])
+		if err != nil {
+			return err
+		}
+		return w.WriteInt(boolInt(created))
+	case "DELCONSUMER":
+		if len(args) != 4 {
+			return errors.New("syntax error")
+		}
+		removed, err := h.db.XGroupDelConsumer(args[1], args[2], args[3])
+		if err != nil {
+			return err
+		}
+		return w.WriteInt(removed)
+	default:
+		return errors.New("unknown XGROUP subcommand")
+	}
+}
+
+func parseXReadGroupArguments(args []string) (string, string, []engine.StreamReadRequest, engine.StreamGroupReadOptions, bool, int64, error) {
+	if len(args) < 4 || !strings.EqualFold(args[0], "GROUP") {
+		return "", "", nil, engine.StreamGroupReadOptions{}, false, 0, errors.New("syntax error")
+	}
+	group, consumer := args[1], args[2]
+	options := engine.StreamGroupReadOptions{}
+	block := false
+	timeout := int64(0)
+	index := 3
+	for index < len(args) && !strings.EqualFold(args[index], "STREAMS") {
+		switch strings.ToUpper(args[index]) {
+		case "COUNT":
+			if index+1 >= len(args) {
+				return "", "", nil, options, false, 0, errors.New("syntax error")
+			}
+			value, err := strconv.ParseInt(args[index+1], 10, 64)
+			if err != nil || value <= 0 {
+				return "", "", nil, options, false, 0, engine.ErrInvalidInteger
+			}
+			options.Count = value
+			index += 2
+		case "BLOCK":
+			if index+1 >= len(args) {
+				return "", "", nil, options, false, 0, errors.New("syntax error")
+			}
+			value, err := strconv.ParseInt(args[index+1], 10, 64)
+			if err != nil || value < 0 {
+				return "", "", nil, options, false, 0, engine.ErrInvalidInteger
+			}
+			block, timeout = true, value
+			index += 2
+		case "NOACK":
+			options.NoAck = true
+			index++
+		default:
+			return "", "", nil, options, false, 0, errors.New("syntax error")
+		}
+	}
+	if index >= len(args) || !strings.EqualFold(args[index], "STREAMS") {
+		return "", "", nil, options, false, 0, errors.New("syntax error")
+	}
+	requests, err := parseStreamReadRequests(args[index+1:], true)
+	return group, consumer, requests, options, block, timeout, err
+}
+
+func (h *handler) writeXPending(w *proto.Writer, args []string) error {
+	if len(args) == 2 {
+		summary, err := h.db.XPendingSummary(args[0], args[1])
+		if err != nil {
+			return err
+		}
+		if err := w.WriteArrayHeader(4); err != nil {
+			return err
+		}
+		if err := w.WriteInt(summary.Count); err != nil {
+			return err
+		}
+		if summary.Count == 0 {
+			if err := w.WriteNil(); err != nil {
+				return err
+			}
+			if err := w.WriteNil(); err != nil {
+				return err
+			}
+		} else {
+			if err := w.WriteBlobString([]byte(summary.Smallest.String())); err != nil {
+				return err
+			}
+			if err := w.WriteBlobString([]byte(summary.Greatest.String())); err != nil {
+				return err
+			}
+		}
+		names := make([]string, 0, len(summary.Consumers))
+		for name := range summary.Consumers {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		if err := w.WriteArrayHeader(len(names)); err != nil {
+			return err
+		}
+		for _, name := range names {
+			if err := w.WriteArrayHeader(2); err != nil {
+				return err
+			}
+			if err := w.WriteBlobString([]byte(name)); err != nil {
+				return err
+			}
+			if err := w.WriteInt(summary.Consumers[name]); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if len(args) != 5 && len(args) != 6 {
+		return errors.New("syntax error")
+	}
+	start, err := parseStreamRangeBound(args[2], false)
+	if err != nil {
+		return err
+	}
+	end, err := parseStreamRangeBound(args[3], true)
+	if err != nil {
+		return err
+	}
+	count, err := strconv.ParseInt(args[4], 10, 64)
+	if err != nil || count <= 0 {
+		return engine.ErrInvalidInteger
+	}
+	consumer := ""
+	if len(args) == 6 {
+		consumer = args[5]
+	}
+	items, err := h.db.XPendingRange(args[0], args[1], start, end, count, consumer)
+	if err != nil {
+		return err
+	}
+	if err := w.WriteArrayHeader(len(items)); err != nil {
+		return err
+	}
+	for _, item := range items {
+		if err := w.WriteArrayHeader(4); err != nil {
+			return err
+		}
+		if err := w.WriteBlobString([]byte(item.ID.String())); err != nil {
+			return err
+		}
+		if err := w.WriteBlobString([]byte(item.Consumer)); err != nil {
+			return err
+		}
+		if err := w.WriteInt64(item.IdleMillis); err != nil {
+			return err
+		}
+		if err := w.WriteInt64(int64(item.Deliveries)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (h *handler) executeXClaim(args []string) ([]engine.StreamEntry, []engine.StreamID, bool, error) {
+	minIdle, err := strconv.ParseInt(args[3], 10, 64)
+	if err != nil || minIdle < 0 {
+		return nil, nil, false, engine.ErrInvalidInteger
+	}
+	index := 4
+	for index < len(args) && !isXClaimOption(args[index]) {
+		index++
+	}
+	if index == 4 {
+		return nil, nil, false, errors.New("syntax error")
+	}
+	ids, err := parseStreamIDs(args[4:index])
+	if err != nil {
+		return nil, nil, false, err
+	}
+	options := engine.StreamClaimOptions{}
+	for index < len(args) {
+		switch strings.ToUpper(args[index]) {
+		case "IDLE":
+			if index+1 >= len(args) {
+				return nil, nil, false, errors.New("syntax error")
+			}
+			value, err := strconv.ParseInt(args[index+1], 10, 64)
+			if err != nil || value < 0 {
+				return nil, nil, false, engine.ErrInvalidInteger
+			}
+			options.IdleMillis = &value
+			index += 2
+		case "TIME":
+			if index+1 >= len(args) {
+				return nil, nil, false, errors.New("syntax error")
+			}
+			value, err := strconv.ParseInt(args[index+1], 10, 64)
+			if err != nil || value < 0 {
+				return nil, nil, false, engine.ErrInvalidInteger
+			}
+			options.TimeMillis = &value
+			index += 2
+		case "RETRYCOUNT":
+			if index+1 >= len(args) {
+				return nil, nil, false, errors.New("syntax error")
+			}
+			value, err := strconv.ParseUint(args[index+1], 10, 64)
+			if err != nil {
+				return nil, nil, false, engine.ErrInvalidInteger
+			}
+			options.RetryCount = &value
+			index += 2
+		case "FORCE":
+			options.Force = true
+			index++
+		case "JUSTID":
+			options.JustID = true
+			index++
+		default:
+			return nil, nil, false, errors.New("syntax error")
+		}
+	}
+	entries, claimed, err := h.db.XClaim(args[0], args[1], args[2], minIdle, ids, options)
+	return entries, claimed, options.JustID, err
+}
+
+func isXClaimOption(value string) bool {
+	switch strings.ToUpper(value) {
+	case "IDLE", "TIME", "RETRYCOUNT", "FORCE", "JUSTID":
+		return true
+	default:
+		return false
+	}
+}
+
+func (h *handler) executeXAutoClaim(args []string) (engine.StreamAutoClaimResult, bool, error) {
+	minIdle, err := strconv.ParseInt(args[3], 10, 64)
+	if err != nil || minIdle < 0 {
+		return engine.StreamAutoClaimResult{}, false, engine.ErrInvalidInteger
+	}
+	start, err := parseStreamID(args[4])
+	if err != nil {
+		return engine.StreamAutoClaimResult{}, false, err
+	}
+	count := int64(100)
+	justID := false
+	for index := 5; index < len(args); {
+		switch strings.ToUpper(args[index]) {
+		case "COUNT":
+			if index+1 >= len(args) {
+				return engine.StreamAutoClaimResult{}, false, errors.New("syntax error")
+			}
+			count, err = strconv.ParseInt(args[index+1], 10, 64)
+			if err != nil || count <= 0 {
+				return engine.StreamAutoClaimResult{}, false, engine.ErrInvalidInteger
+			}
+			index += 2
+		case "JUSTID":
+			justID = true
+			index++
+		default:
+			return engine.StreamAutoClaimResult{}, false, errors.New("syntax error")
+		}
+	}
+	result, err := h.db.XAutoClaim(args[0], args[1], args[2], minIdle, start, count, justID)
+	return result, justID, err
+}
+
+func writeStreamEntries(w *proto.Writer, entries []engine.StreamEntry) error {
+	if err := w.WriteArrayHeader(len(entries)); err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if err := w.WriteArrayHeader(2); err != nil {
+			return err
+		}
+		if err := w.WriteBlobString([]byte(entry.ID.String())); err != nil {
+			return err
+		}
+		if err := w.WriteArrayHeader(len(entry.Fields) * 2); err != nil {
+			return err
+		}
+		for _, field := range entry.Fields {
+			if err := w.WriteBlobString([]byte(field.Name)); err != nil {
+				return err
+			}
+			if err := w.WriteBlobString([]byte(field.Value)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func writeStreamReadResults(w *proto.Writer, results []engine.StreamReadResult) error {
+	if err := w.WriteArrayHeader(len(results)); err != nil {
+		return err
+	}
+	for _, result := range results {
+		if err := w.WriteArrayHeader(2); err != nil {
+			return err
+		}
+		if err := w.WriteBlobString([]byte(result.Key)); err != nil {
+			return err
+		}
+		if err := writeStreamEntries(w, result.Entries); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func writeStreamIDs(w *proto.Writer, ids []engine.StreamID) error {
+	if err := w.WriteArrayHeader(len(ids)); err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if err := w.WriteBlobString([]byte(id.String())); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func parseListDirection(value string) (engine.ListDirection, error) {
@@ -2009,6 +2820,12 @@ func writeDispatchError(w *proto.Writer, err error) error {
 	}
 	if errors.Is(err, engine.ErrWrongType) {
 		return w.WriteErrorCode("WRONGTYPE", "Operation against a key holding the wrong kind of value")
+	}
+	if errors.Is(err, engine.ErrGroupExists) {
+		return w.WriteErrorCode("BUSYGROUP", err.Error())
+	}
+	if errors.Is(err, engine.ErrNoGroup) {
+		return w.WriteErrorCode("NOGROUP", err.Error())
 	}
 	return w.WriteError(err.Error())
 }

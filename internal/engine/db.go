@@ -16,6 +16,7 @@ type DB struct {
 	mu                 dbMutex
 	entries            map[string]*entry
 	listWaiters        map[string][]*listWaiter
+	streamWaiters      map[string][]*streamWaiter
 	waitersClosed      bool
 	now                func() time.Time
 	expiring           map[string]int64
@@ -52,6 +53,7 @@ func newCoreDB(now func() time.Time) *DB {
 	db := &DB{
 		entries:            make(map[string]*entry),
 		listWaiters:        make(map[string][]*listWaiter),
+		streamWaiters:      make(map[string][]*streamWaiter),
 		now:                now,
 		expiring:           make(map[string]int64),
 		expiringHashFields: make(map[hashFieldRef]int64),

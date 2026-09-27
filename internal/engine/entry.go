@@ -21,9 +21,14 @@ var (
 	// ErrNoKeys is returned when a multi-key operation has no source keys.
 	ErrNoKeys = errors.New("at least one key is required")
 
-	ErrInvalidFloat   = errors.New("value is not a valid float")
-	ErrInvalidOffset  = errors.New("offset is out of range")
-	ErrInvalidOptions = errors.New("incompatible options")
+	ErrInvalidFloat     = errors.New("value is not a valid float")
+	ErrInvalidOffset    = errors.New("offset is out of range")
+	ErrInvalidOptions   = errors.New("incompatible options")
+	ErrInvalidStreamID  = errors.New("invalid stream ID")
+	ErrStreamIDTooSmall = errors.New("stream ID is equal to or smaller than the target stream top item")
+	ErrStreamIDOverflow = errors.New("stream ID sequence overflow")
+	ErrGroupExists      = errors.New("consumer group already exists")
+	ErrNoGroup          = errors.New("consumer group does not exist")
 
 	// ErrNoSuchKey is returned when an operation requires an existing source.
 	ErrNoSuchKey = errors.New("no such key")
@@ -43,6 +48,7 @@ const (
 	KindList
 	KindSet
 	KindSortedSet
+	KindStream
 )
 
 func (k Kind) String() string {
@@ -59,6 +65,8 @@ func (k Kind) String() string {
 		return "set"
 	case KindSortedSet:
 		return "zset"
+	case KindStream:
+		return "stream"
 	default:
 		return "unknown"
 	}

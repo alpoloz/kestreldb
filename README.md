@@ -6,7 +6,8 @@ KestrelDB supports the RESP2 and RESP3 protocols, along with a simple line-orien
 
 ## Features
 
-- Strings, hashes, lists, sets, and sorted sets
+- Strings, hashes, lists, sets, sorted sets, and streams
+- Stream consumer groups with pending-entry tracking, claiming, and blocking reads
 - Key, hash-field, and set-member expiration
 - Blocking list operations with cancellation and timeouts
 - A 64-shard keyspace with atomic multi-key operations

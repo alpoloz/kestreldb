@@ -47,6 +47,8 @@ const (
 	storeKeys
 	numKeys
 	storeNumKeys
+	streamKeys
+	secondKey
 )
 
 var commands = makeCommandMetadata()
@@ -87,6 +89,10 @@ func makeCommandMetadata() map[string]commandMeta {
 	add(read, firstKey, 1, 3, "ZRANDMEMBER")
 	add(read, allKeys, 1, unlimited, "EXISTS TOUCH MGET SUNION SINTER SDIFF")
 	add(read, numKeys, 2, unlimited, "ZUNION ZINTER ZDIFF ZINTERCARD")
+	add(read, firstKey, 1, 1, "XLEN")
+	add(read, firstKey, 3, 5, "XRANGE XREVRANGE")
+	add(read, firstKey, 2, unlimited, "XPENDING")
+	add(read|commandBlocking, streamKeys, 3, unlimited, "XREAD")
 
 	add(0, noKeys, 0, 1, "FLUSHDB")
 	add(0, allKeys, 1, unlimited, "DEL")
@@ -104,6 +110,12 @@ func makeCommandMetadata() map[string]commandMeta {
 	add(0, firstKey, 3, 3, "SETRANGE LSET LTRIM LREM HSETNX HINCRBY HINCRBYFLOAT ZINCRBY ZREMRANGEBYRANK ZREMRANGEBYSCORE ZREMRANGEBYLEX")
 	add(0, firstKey, 4, 4, "LINSERT")
 	add(0, firstKey, 3, unlimited, "SADDEX ZADD")
+	add(0, firstKey, 4, unlimited, "XADD")
+	add(0, firstKey, 2, unlimited, "XDEL")
+	add(0, firstKey, 3, unlimited, "XTRIM XACK")
+	add(0, secondKey, 3, unlimited, "XGROUP")
+	add(0, firstKey, 5, unlimited, "XCLAIM XAUTOCLAIM")
+	add(commandBlocking, streamKeys, 6, unlimited, "XREADGROUP")
 	add(0, firstKey, 2, 3, "EXPIRE PEXPIRE EXPIREAT PEXPIREAT")
 	add(0, firstKey, 4, unlimited, "HEXPIRE HPEXPIRE HEXPIREAT HPEXPIREAT")
 	add(0, firstKey, 3, unlimited, "HTTL HPTTL HEXPIRETIME HPEXPIRETIME HPERSIST")
@@ -147,6 +159,11 @@ func commandKeys(name string, args []string) []string {
 	switch meta.keySpec {
 	case firstKey:
 		return args[:1]
+	case secondKey:
+		if len(args) < 2 {
+			return nil
+		}
+		return args[1:2]
 	case allKeys:
 		return args
 	case pairKeys:
@@ -179,6 +196,22 @@ func commandKeys(name string, args []string) []string {
 			return keys
 		}
 		return append(keys, args[start+1:start+1+n]...)
+	case streamKeys:
+		streamIndex := -1
+		for index, arg := range args {
+			if strings.EqualFold(arg, "STREAMS") {
+				streamIndex = index
+				break
+			}
+		}
+		if streamIndex < 0 {
+			return nil
+		}
+		remaining := len(args) - streamIndex - 1
+		if remaining < 2 || remaining%2 != 0 {
+			return nil
+		}
+		return args[streamIndex+1 : streamIndex+1+remaining/2]
 	default:
 		return nil
 	}
