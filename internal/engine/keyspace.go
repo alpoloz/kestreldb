@@ -147,6 +147,8 @@ func cloneEntry(source *entry) *entry {
 		cloned.value = copyValue
 	case KindStream:
 		cloned.value = source.value.(*streamValue).clone()
+	case KindJSON:
+		cloned.value = cloneJSONValue(source.value)
 	}
 	return cloned
 }

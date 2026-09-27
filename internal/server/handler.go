@@ -169,6 +169,29 @@ func (h *handler) dispatchContext(
 
 	case "TYPE":
 		return false, w.WriteSimpleString(h.db.Type(args[0]).String())
+	case "JSON.SET", "JSON.GET", "JSON.DEL", "JSON.FORGET", "JSON.TYPE", "JSON.CLEAR", "JSON.NUMINCRBY", "JSON.STRAPPEND", "JSON.ARRAPPEND", "JSON.ARRLEN", "JSON.OBJLEN", "JSON.OBJKEYS":
+		return false, h.writeJSONCommand(w, cmd, args)
+	case "GETBIT", "SETBIT", "BITCOUNT", "BITPOS", "BITOP", "BITFIELD", "BITFIELD_RO":
+		return false, h.writeBitmapCommand(w, cmd, args)
+	case "GEOADD", "GEOPOS", "GEODIST", "GEOHASH", "GEOSEARCH":
+		return false, h.writeGeoCommand(w, cmd, args)
+	case "PFADD":
+		changed, err := h.db.PFAdd(args[0], args[1:]...)
+		if err != nil {
+			return false, err
+		}
+		return false, w.WriteInt(boolInt(changed))
+	case "PFCOUNT":
+		count, err := h.db.PFCount(args...)
+		if err != nil {
+			return false, err
+		}
+		return false, w.WriteInt(count)
+	case "PFMERGE":
+		if err := h.db.PFMerge(args[0], args[1:]...); err != nil {
+			return false, err
+		}
+		return false, w.WriteSimpleString("OK")
 
 	case "DEL":
 		return false, w.WriteInt(h.db.Del(args...))

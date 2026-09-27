@@ -49,6 +49,7 @@ const (
 	storeNumKeys
 	streamKeys
 	secondKey
+	bitopKeys
 )
 
 var commands = makeCommandMetadata()
@@ -88,14 +89,24 @@ func makeCommandMetadata() map[string]commandMeta {
 	add(read, firstKey, 1, 2, "SRANDMEMBER")
 	add(read, firstKey, 1, 3, "ZRANDMEMBER")
 	add(read, allKeys, 1, unlimited, "EXISTS TOUCH MGET SUNION SINTER SDIFF")
+	add(read, allKeys, 1, unlimited, "PFCOUNT")
 	add(read, numKeys, 2, unlimited, "ZUNION ZINTER ZDIFF ZINTERCARD")
 	add(read, firstKey, 1, 1, "XLEN")
 	add(read, firstKey, 3, 5, "XRANGE XREVRANGE")
 	add(read, firstKey, 2, unlimited, "XPENDING")
+	add(read, firstKey, 1, 2, "JSON.GET JSON.TYPE JSON.ARRLEN JSON.OBJLEN JSON.OBJKEYS")
+	add(read, firstKey, 2, 2, "GETBIT")
+	add(read, firstKey, 2, unlimited, "GEOPOS GEOHASH")
+	add(read, firstKey, 3, 4, "GEODIST")
+	add(read, firstKey, 5, unlimited, "GEOSEARCH")
+	add(read, firstKey, 1, 4, "BITCOUNT")
+	add(read, firstKey, 2, 5, "BITPOS")
+	add(read, firstKey, 2, unlimited, "BITFIELD_RO")
 	add(read|commandBlocking, streamKeys, 3, unlimited, "XREAD")
 
 	add(0, noKeys, 0, 1, "FLUSHDB")
 	add(0, allKeys, 1, unlimited, "DEL")
+	add(0, allKeys, 2, unlimited, "PFMERGE")
 	add(0, firstTwoKeys, 2, 2, "RENAME RENAMENX RPOPLPUSH")
 	add(0, firstTwoKeys, 2, 5, "COPY")
 	add(0, firstTwoKeys, 3, 3, "SMOVE BRPOPLPUSH")
@@ -107,10 +118,19 @@ func makeCommandMetadata() map[string]commandMeta {
 	add(0, firstKey, 1, 2, "LPOP RPOP SPOP ZPOPMIN ZPOPMAX")
 	add(0, firstKey, 2, 2, "SETNX GETSET APPEND INCRBY DECRBY INCRBYFLOAT")
 	add(0, firstKey, 2, unlimited, "LPUSH RPUSH HDEL SADD SREM ZREM SET")
+	add(0, firstKey, 2, unlimited, "PFADD")
 	add(0, firstKey, 3, 3, "SETRANGE LSET LTRIM LREM HSETNX HINCRBY HINCRBYFLOAT ZINCRBY ZREMRANGEBYRANK ZREMRANGEBYSCORE ZREMRANGEBYLEX")
 	add(0, firstKey, 4, 4, "LINSERT")
 	add(0, firstKey, 3, unlimited, "SADDEX ZADD")
 	add(0, firstKey, 4, unlimited, "XADD")
+	add(0, firstKey, 3, 4, "JSON.SET")
+	add(0, firstKey, 1, 2, "JSON.DEL JSON.FORGET JSON.CLEAR")
+	add(0, firstKey, 3, 3, "JSON.NUMINCRBY JSON.STRAPPEND")
+	add(0, firstKey, 3, unlimited, "JSON.ARRAPPEND")
+	add(0, firstKey, 3, 3, "SETBIT")
+	add(0, firstKey, 4, unlimited, "GEOADD")
+	add(0, firstKey, 2, unlimited, "BITFIELD")
+	add(0, bitopKeys, 3, unlimited, "BITOP")
 	add(0, firstKey, 2, unlimited, "XDEL")
 	add(0, firstKey, 3, unlimited, "XTRIM XACK")
 	add(0, secondKey, 3, unlimited, "XGROUP")
@@ -164,6 +184,8 @@ func commandKeys(name string, args []string) []string {
 			return nil
 		}
 		return args[1:2]
+	case bitopKeys:
+		return args[1:]
 	case allKeys:
 		return args
 	case pairKeys:

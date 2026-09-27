@@ -49,6 +49,7 @@ const (
 	KindSet
 	KindSortedSet
 	KindStream
+	KindJSON
 )
 
 func (k Kind) String() string {
@@ -67,6 +68,8 @@ func (k Kind) String() string {
 		return "zset"
 	case KindStream:
 		return "stream"
+	case KindJSON:
+		return "ReJSON-RL"
 	default:
 		return "unknown"
 	}

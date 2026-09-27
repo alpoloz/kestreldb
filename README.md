@@ -6,7 +6,7 @@ KestrelDB supports the RESP2 and RESP3 protocols, along with a simple line-orien
 
 ## Features
 
-- Strings, hashes, lists, sets, sorted sets, and streams
+- Strings, hashes, lists, sets, sorted sets, streams, and native JSON documents
 - Stream consumer groups with pending-entry tracking, claiming, and blocking reads
 - Key, hash-field, and set-member expiration
 - Blocking list operations with cancellation and timeouts
@@ -15,6 +15,7 @@ KestrelDB supports the RESP2 and RESP3 protocols, along with a simple line-orien
 - Primary-replica synchronization and reconnect catch-up
 - Cluster hash slots, hash tags, redirects, and cross-slot validation
 - Binary-safe keys and values
+- Bitmap and bitfield commands, geospatial search, and HyperLogLog
 
 ## Requirements
 

@@ -27,6 +27,7 @@ type snapshotEntry struct {
 	Set      []snapshotMember `json:"set,omitempty"`
 	ZSet     []snapshotScore  `json:"zset,omitempty"`
 	Stream   *snapshotStream  `json:"stream,omitempty"`
+	JSON     json.RawMessage  `json:"json,omitempty"`
 }
 
 type snapshotStream struct {
@@ -170,6 +171,12 @@ func (db *DB) snapshotLocked() ([]byte, error) {
 			}
 		case KindStream:
 			item.Stream = snapshotStreamValue(e.value.(*streamValue))
+		case KindJSON:
+			var err error
+			item.JSON, err = json.Marshal(e.value)
+			if err != nil {
+				return nil, err
+			}
 		default:
 			return nil, fmt.Errorf("snapshot: unsupported kind %d", e.kind)
 		}
@@ -398,6 +405,12 @@ func (db *DB) LoadSnapshot(data []byte) error {
 				return err
 			}
 			e.value = stream
+		case KindJSON:
+			value, err := parseJSONValue(item.JSON)
+			if err != nil {
+				return fmt.Errorf("invalid JSON snapshot value: %w", err)
+			}
+			e.value = value
 		default:
 			return fmt.Errorf("unsupported snapshot kind %d", item.Kind)
 		}
